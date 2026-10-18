@@ -90,14 +90,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ---- ghcr 包默认是 private，尝试改成 public（失败不阻断）----
+      # ---- ghcr 包默认 private，尝试改成 public（失败不阻断）----
+      # GITHUB_TOKEN 权限受限，此步可能失败——visibility 是持久属性，手动改一次即可。
       - name: Make ghcr package public (best effort)
         continue-on-error: true
         run: |
-          curl -sf -X PATCH \
+          RESP=$(curl -sS -X PATCH \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
+            -w "\n%{http_code}" \
             "https://api.github.com/user/packages/container/115nas-docker" \
-            -d '{"visibility":"public"}' \
-            && echo "ghcr 包已设为 public" \
-            || echo "未能自动设置公开（首次发布后也可在 Package settings 手动改）"
+            -d '{"visibility":"public"}')
+          echo "response: $RESP"
+          case "$RESP" in
+            *200|*201) echo "ghcr 包已设为 public" ;;
+            *) echo "自动设置公开失败（GITHUB_TOKEN 权限受限属预期）——手动改：Package settings -> Change visibility -> Public（一次性）" ;;
+          esac

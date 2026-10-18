@@ -1,7 +1,7 @@
 # 115nas — 115 生活客户端 Docker 版
 
-把 **115 生活官方 Linux 桌面客户端**（`115Life_37.3.1.deb`）跑进 Docker 容器，
-通过浏览器（noVNC）直接使用：**扫码登录、文件浏览/管理、上传、下载、云下载、
+全AI生成，把 **115 生活官方 Linux 桌面客户端**（`115Life_37.3.1.deb`）跑进 Docker 容器，  
+通过浏览器（noVNC）直接使用：**扫码登录、文件浏览/管理、上传、下载、云下载、  
 在线播放、分享**，官方客户端全功能保留，无需在电脑上装任何软件。
 
 - 一条 `docker compose up -d` 完成部署（首次构建约 5-15 分钟）
@@ -21,7 +21,7 @@ NAS_SHARE=/share/Download docker compose up -d
 http://<主机IP>:6080/
 ```
 
-首次会构建镜像（拉 debian:12 + apt + 官方 deb，约 5-15 分钟）。
+首次会构建镜像（拉 debian:12 + apt + 官方 deb，约 5-15 分钟）。  
 之后用 115 App 扫码登录。
 
 不用 compose 的话，等价 `docker run`：
@@ -46,71 +46,48 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 2. 按 `Ctrl+Space` 呼出输入法
 3. 打拼音，候选项显示在虚拟屏上，**数字键选字**
 
-任何场景都可以用「电脑上复制 → noVNC 窗口内 `Ctrl+V` 粘贴」兜底
+任何场景都可以用「电脑上复制 → noVNC 窗口内 `Ctrl+V` 粘贴」兜底  
 （noVNC 不传输本机输入法，但剪贴板是通的）。
 
 ## 目录与持久化
 
-| 容器内路径 | 宿主机（compose 默认） | 说明 |
-|---|---|---|
-| `/root/Downloads` | `$NAS_SHARE` | **客户端默认下载目录**，直接落宿主机磁盘 |
-| `/media/nas` | `$NAS_SHARE` | 同一目录的另一个入口，客户端文件选择器可见 |
-| `/config` | `./data/config` | 客户端配置（勿删） |
-| `/appdata` | `./data/appdata` | WebKit Cookie = **扫码登录态**（勿删） |
-| `/cache` | `./data/cache` | 视频缓存（可清理） |
-| `/logs` | `./logs` | 各组件日志 |
-| `/certs/server.pem` | 挂载点 | HTTPS 证书（ PEM，证书+私钥合一）；存在才监听 6081 |
+| 容器内路径               | 宿主机（compose 默认）  | 说明                                |
+| ------------------- | ---------------- | --------------------------------- |
+| `/root/Downloads`   | `$NAS_SHARE`     | **客户端默认下载目录**，直接落宿主机磁盘            |
+| `/media/nas`        | `$NAS_SHARE`     | 同一目录的另一个入口，客户端文件选择器可见             |
+| `/config`           | `./data/config`  | 客户端配置（勿删）                         |
+| `/appdata`          | `./data/appdata` | WebKit Cookie = **扫码登录态**（勿删）     |
+| `/cache`            | `./data/cache`   | 视频缓存（可清理）                         |
+| `/logs`             | `./logs`         | 各组件日志                             |
+| `/certs/server.pem` | 挂载点              | HTTPS 证书（ PEM，证书+私钥合一）；存在才监听 6081 |
 
 ## 配置（环境变量）
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `TZ` | `Asia/Shanghai` | 时区 |
-| `SCREEN_WIDTH` / `SCREEN_HEIGHT` / `SCREEN_DEPTH` | 1280 / 800 / 24 | 虚拟屏分辨率（浏览器端自动缩放适配） |
-| `HTTP_PORT` / `HTTPS_PORT` | 6080 / 6081 | noVNC 端口（改需同步改 compose 的 ports） |
-| `VNC_PASSWORD` | 空 | noVNC 连接密码。**暴露到公网时务必设置** |
-| `VNC_PORT` | 5900 | x11vnc 端口（仅监听 127.0.0.1，一般不用改） |
-| `HTTPS_CERT` | `/certs/server.pem` | HTTPS 证书路径 |
-
-## 镜像导出与迁移
-
-镜像只需构建一次。重装、迁移到别的机器时，导出/导入秒级完成：
-
-```bash
-# 导出（约 1.2GB）
-docker save -o 115nas-image-1.1.0.tar 115nas:1.1.0
-
-# 在目标机器导入
-docker load -i 115nas-image-1.1.0.tar
-```
+| 变量                                                | 默认                  | 说明                              |
+| ------------------------------------------------- | ------------------- | ------------------------------- |
+| `TZ`                                              | `Asia/Shanghai`     | 时区                              |
+| `SCREEN_WIDTH` / `SCREEN_HEIGHT` / `SCREEN_DEPTH` | 1280 / 800 / 24     | 虚拟屏分辨率（浏览器端自动缩放适配）              |
+| `HTTP_PORT` / `HTTPS_PORT`                        | 6080 / 6081         | noVNC 端口（改需同步改 compose 的 ports） |
+| `VNC_PASSWORD`                                    | 空                   | noVNC 连接密码。**暴露到公网时务必设置**       |
+| `VNC_PORT`                                        | 5900                | x11vnc 端口（仅监听 127.0.0.1，一般不用改）  |
+| `HTTPS_CERT`                                      | `/certs/server.pem` | HTTPS 证书路径                      |
 
 ## 镜像仓库（ghcr.io / Docker Hub）
 
-每次打版本标签，GitHub Actions 自动构建并推送到两个仓库：
+打版本标签即触发 GitHub Actions 自动构建推送：
 
 ```bash
-ghcr.io/xheia/115nas-docker:1.1.0
-xheia/115nas-docker:1.1.0            # Docker Hub
+git tag v1.1.0 && git push origin v1.1.0
 ```
 
-发布方式（任选一）：
+产物：`ghcr.io/xheia/115nas-docker:1.1.0`（ghcr 已发布 `main` / `edge`，public）；
+配好 Docker Hub Secrets 后同时推 `xheia/115nas-docker:1.1.0`。
 
-```bash
-git tag v1.1.0 && git push origin v1.1.0      # 打标签即触发
-# 或在 GitHub 仓库页：Actions → Publish Docker image → Run workflow
-```
-
-流水线见 `.github/workflows/docker-publish.yml`。**首次发布 Docker Hub 前**需在仓库
-Settings → Secrets and variables → Actions 添加两个 Secret：
-
-| Secret | 值 |
-|---|---|
-| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
-| `DOCKERHUB_TOKEN` | Docker Hub → Account Settings → Personal access tokens（Read/Write/Delete，**不是登录密码**） |
-
-ghcr.io 无需配置（自动用 `GITHUB_TOKEN`）；若未配 Docker Hub 密钥，则只发布 ghcr。
-ghcr 包首次推送后如仍是 private，流水线会尝试自动改为 public，也可在
-Package settings 里手动改。
+> Docker Hub 启用（一次性）：仓库 Settings → Secrets and variables → Actions 添加
+> `DOCKERHUB_USERNAME`（Docker Hub 用户名）和 `DOCKERHUB_TOKEN`
+> （hub.docker.com → Account Settings → Personal access tokens，权限 Read/Write/Delete，
+> **不是登录密码**）。仓库不存在时首次推送自动创建，默认 private，推完可在 Hub 后台改
+> public。ghcr.io 无需任何配置。
 
 使用发布版镜像（跳过本地构建）：把 compose 里的 `build: .` 删掉，`image:` 改为
 
@@ -118,36 +95,21 @@ Package settings 里手动改。
 image: ghcr.io/xheia/115nas-docker:1.1.0
 ```
 
-> 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动时用上面
+> 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动时用上面  
 > 「镜像导出与迁移」的 tar 文件，或本地构建。
-
-## 在 QNAP（QTS / Container Station）上使用
-
-Container Station →「创建应用程序」→ 导入本目录的 `docker-compose.yml`
-（把整个目录上传，`build: .` 需要同目录的 Dockerfile、entrypoint.sh 和 deb）。
-
-QTS 专属注意：
-
-- **不要挂 `/share`**——QTS 上它是 16MB 的 tmpfs，挂进去只见空目录、
-  写进去全占内存（触发「系统存储空间不足」弹窗）。挂真实卷根，如
-  `/share/CACHEDEV2_DATA`。
-- `ports` 与 `network_mode: host` **二选一**，同时写 compose 直接报错。
-- 走 compose 路线没有 QTS 主菜单图标，访问方式是
-  `http://<NAS IP>:6080/`（建议加浏览器书签）。
-- 首次构建镜像约需 3GB 空间，确保 Container Station 的存储卷在数据卷上。
 
 ## 排障
 
-| 现象 | 排查 |
-|---|---|
+| 现象               | 排查                                                            |
+| ---------------- | ------------------------------------------------------------- |
 | 打开 6080 显示「拒绝连接」 | 容器没起来：`docker ps -a` 看状态；`docker logs 115nas` 看原因；首次启动后镜像还在构建 |
-| 界面一直转圈连不上 | 看容器内 `/logs/entrypoint.log`、`x11vnc.log`、`websockify.log` |
-| 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
-| 下载的文件不在 NAS 上 | 下载目录被改过——客户端设置里指回 `/root/Downloads`；或检查 `NAS_SHARE` 挂载 |
-| 中文输不进去 | `Ctrl+Space` 呼出 fcitx5；不行就用 `Ctrl+V` 粘贴 |
-| 端口 6080 被占用 | 改 `HTTP_PORT` 并同步 compose 的 ports 映射 |
-| 弹「系统存储空间不足」（QTS） | 系统卷/RAMDisk 紧张：重启 NAS；确认没把 `/share`（tmpfs）挂进容器 |
-| 想重新构建镜像 | `docker compose build --no-cache` |
+| 界面一直转圈连不上        | 看容器内 `/logs/entrypoint.log`、`x11vnc.log`、`websockify.log`     |
+| 扫码后重启要重新扫码       | `/config`、`/appdata` 没挂卷或被删                                   |
+| 下载的文件不在 NAS 上    | 下载目录被改过——客户端设置里指回 `/root/Downloads`；或检查 `NAS_SHARE` 挂载        |
+| 中文输不进去           | `Ctrl+Space` 呼出 fcitx5；不行就用 `Ctrl+V` 粘贴                       |
+| 端口 6080 被占用      | 改 `HTTP_PORT` 并同步 compose 的 ports 映射                          |
+| 弹「系统存储空间不足」（QTS） | 系统卷/RAMDisk 紧张：重启 NAS；确认没把 `/share`（tmpfs）挂进容器                |
+| 想重新构建镜像          | `docker compose build --no-cache`                             |
 
 ## 已知限制
 
@@ -169,5 +131,5 @@ docker-compose.yml  Compose 编排（含 QNAP 路径示例与两个常见坑注�
 ## 版权与许可
 
 - 本项目代码（Dockerfile / entrypoint.sh / compose）：MIT
-- `115Life_37.3.1.deb` 版权归 **广东一一五科技股份有限公司** 所有，
+- `115Life_37.3.1.deb` 版权归 **广东一一五科技股份有限公司** 所有，  
   本仓库仅打包其官方 deb 以便离线构建，不修改其内容
