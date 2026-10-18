@@ -108,6 +108,221 @@ image: ghcr.io/xheia/115nas-docker:latest
 > 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动就本地构建。
 > 镜像内 115 客户端版本可用 `docker inspect --format '{{index .Config.Labels "115nas.client-version"}}' <镜像名>` 查看。
 
+### CI 流水线完整配置
+
+即 `.github/workflows/docker-publish.yml` 原文（仓库里改这里即可调整自动化行为）：
+
+<details>
+<summary>展开 docker-publish.yml（约 200 行）</summary>
+
+```yaml
+name: Publish Docker image
+
+# 触发方式：
+#   1) 定时（每天 18:00 北京时间）：检查 115 官方 Linux 客户端是否有新版本，
+#      有则自动下载新 deb、更新 Dockerfile 并提交，然后重建发布 latest。
+#   2) 打版本标签推送：git tag v1.1.0 && git push origin v1.1.0
+#   3. GitHub 仓库页面手动：Actions → Publish Docker image → Run workflow
+#
+# 产物（均为 linux/amd64——官方 deb 只有 amd64，无法构建 ARM 镜像）：
+#   定时/手动触发：ghcr.io/xheia/115nas-docker:{main,edge,latest}
+#                 （配了 Docker Hub 密钥则同步推 <DOCKERHUB_USERNAME>/115nas-docker）
+#   标签推送 v*  ：ghcr.io/xheia/115nas-docker:<version> + :latest
+#
+# 上游版本检测源（115 官方接口，免登录，实测海外 runner 可达 ~1s）：
+#   https://appversion.115.com/1/web/1.0/api/getMultiVer
+#   → data.115Life_Linux.version_code / .version_url
+#   （该地址来自官方 deb 内 Core115.Net.dll 的字符串，非第三方推测）
+#
+# 需要的仓库 Secrets（Settings → Secrets and variables → Actions，均可选）：
+#   DOCKERHUB_USERNAME  Docker Hub 用户名
+#   DOCKERHUB_TOKEN     Docker Hub PAT，Read/Write/Delete（不是登录密码）
+#   GHCR_PAT            带 write:packages 的 PAT，用于自动设 ghcr 包 public
+#                       （GITHUB_TOKEN 调 /user/packages 会 404，管不了用户级包）
+#
+# 注意：secrets 上下文不能出现在 steps.if 里（GitHub 限制），
+# 故先注入 job 级 env.DH_USER/DH_TOKEN，再用 env 上下文做条件判断。
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "0 10 * * *"   # 每天 18:00（UTC+8）
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: 115nas-docker
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # 定时任务要提交新 deb
+      packages: write      # 推 ghcr
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 检查 115 官方更新（仅定时/手动触发时执行；打 tag 发版不查）----
+      - name: Check 115 upstream update
+        id: check
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          curl -sS -m 30 "https://appversion.115.com/1/web/1.0/api/getMultiVer" -o /tmp/mv.json
+          python3 - <<'PYEOF'
+          import json, re, os
+          d = json.load(open('/tmp/mv.json'))
+          entry = d['data']['115Life_Linux']
+          up, url = entry['version_code'], entry['version_url']
+          notice = entry.get('version_notice_url', '')
+          df = open('Dockerfile', encoding='utf-8').read()
+          m = re.search(r'^ARG LIFE_DEB=115Life_([0-9.]+)\.deb', df, re.M)
+          if not m:
+              raise SystemExit('Dockerfile 中找不到 ARG LIFE_DEB=115Life_<ver>.deb')
+          cur = m.group(1)
+          tup = lambda s: tuple(int(x) for x in s.split('.'))
+          changed = tup(up) > tup(cur)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'upstream={up}\ncurrent={cur}\nurl={url}\nnotice={notice}\n')
+              f.write(f'changed={"true" if changed else "false"}\n')
+          print(f'upstream={up}  current={cur}  changed={changed}')
+          PYEOF
+
+      # ---- 有新版本：下载、校验、替换 deb、更新 Dockerfile/README、提交 ----
+      - name: Download and commit new deb
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          UP="${{ steps.check.outputs.upstream }}"
+          CUR="${{ steps.check.outputs.current }}"
+          URL="${{ steps.check.outputs.url }}"
+          NOTICE="${{ steps.check.outputs.notice }}"
+          echo "downloading $URL"
+          curl -fSL --retry 3 --retry-delay 5 -m 900 -o "115Life_${UP}.deb" "$URL"
+          V=$(dpkg-deb --field "115Life_${UP}.deb" Version)
+          if [ "$V" != "$UP" ]; then
+            echo "::error::deb Version ($V) 与上游版本 ($UP) 不一致，放弃提交"; exit 1
+          fi
+          SZ=$(stat -c%s "115Life_${UP}.deb")
+          if [ "$SZ" -lt 50000000 ]; then
+            echo "::error::deb 大小异常 (${SZ}B)，放弃提交"; exit 1
+          fi
+          rm -f "115Life_${CUR}.deb"
+          sed -i "s/^ARG LIFE_DEB=115Life_[0-9.]*\.deb/ARG LIFE_DEB=115Life_${UP}.deb/" Dockerfile
+          if grep -q "115Life_${CUR}\.deb" README.md; then
+            sed -i "s/115Life_${CUR}\.deb/115Life_${UP}.deb/g" README.md
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有实际变更，跳过提交"
+          else
+            MSG="chore: bump 115Life ${CUR} -> ${UP}"
+            if [ -n "$NOTICE" ]; then MSG="$MSG
+
+          release notice: ${NOTICE}"; fi
+            git commit -m "$MSG"
+            git push origin HEAD:main || {
+              echo "::warning::push 失败（可能有并发提交），rebase 后重试"
+              git fetch origin main && git rebase origin/main && git push origin HEAD:main
+            }
+          fi
+
+      # ---- 客户端版本号（写进镜像 label，docker inspect 可见）----
+      - name: Read client version
+        id: ver
+        run: |
+          CV=$(sed -n 's/^ARG LIFE_DEB=115Life_\([0-9.]*\)\.deb.*/\1/p' Dockerfile)
+          echo "client_version=$CV" >> "$GITHUB_OUTPUT"
+          echo "client version: $CV"
+
+      # ---- ghcr.io（自动使用 GITHUB_TOKEN）----
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- Docker Hub（未配置密钥则整步跳过，只发布 ghcr）----
+      - name: Log in to Docker Hub
+        if: ${{ env.DH_USER != '' && env.DH_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DH_USER }}
+          password: ${{ env.DH_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---- 计算镜像标签 ----
+      # 标签推送 v1.2.3 → 1.2.3 + latest；定时/手动（分支）→ main + edge + latest
+      - name: Compute image tags
+        id: tags
+        run: |
+          REF="${{ github.ref_name }}"
+          VER="${REF#v}"
+          GHCR="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
+          if [ "${REF#v}" != "$REF" ]; then
+            TAGS="${GHCR}:${VER},${GHCR}:latest"
+          else
+            TAGS="${GHCR}:main,${GHCR}:edge,${GHCR}:latest"
+          fi
+          if [ -n "$DH_USER" ]; then
+            if [ "${REF#v}" != "$REF" ]; then
+              TAGS="${TAGS},${DH_USER}/$IMAGE_NAME:${VER},${DH_USER}/$IMAGE_NAME:latest"
+            else
+              TAGS="${TAGS},${DH_USER}/$IMAGE_NAME:main,${DH_USER}/$IMAGE_NAME:edge,${DH_USER}/$IMAGE_NAME:latest"
+            fi
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "将推送: $TAGS"
+
+      # ---- 构建并推送（amd64）----
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            CLIENT_VERSION=${{ steps.ver.outputs.client_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---- ghcr 包默认 private，尝试改成 public（失败不阻断）----
+      # 根因（2026-10-18 实测）：GITHUB_TOKEN 是 installation token，PATCH
+      # /user/packages/... 对它返回 404 Not Found——它无法管理用户级包。
+      # 两条路：① 手动改一次（visibility 是持久属性，之后永久保持）；
+      # ② 想要全自动：建一个带 write:packages 权限的 PAT，
+      # 存为仓库 Secret GHCR_PAT，本步会优先使用它。
+      - name: Make ghcr package public (best effort)
+        continue-on-error: true
+        env:
+          CR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          if [ -n "$CR_PAT" ]; then TOKEN="$CR_PAT"; fi
+          RESP=$(curl -sS -X PATCH \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -w "\n%{http_code}" \
+            "https://api.github.com/user/packages/container/115nas-docker" \
+            -d '{"visibility":"public"}')
+          echo "response: $RESP"
+          case "$RESP" in
+            *200|*201) echo "ghcr 包已设为 public" ;;
+            *) echo "自动设置公开失败——visibility 是持久属性，手动改一次即可：Package settings -> Change visibility -> Public" ;;
+          esac
+```
+
+</details>
+
 ## 排障
 
 | 现象               | 排查                                                            |
