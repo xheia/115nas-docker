@@ -1,21 +1,4 @@
 # 115nas — 115 生活客户端 Docker 版
-# 用法：NAS_SHARE=/path/to/nas/dir docker compose up -d
-#
-# ⚠️ 两个常见坑：
-# 1) 宿主机路径不要直接挂 /share——QNAP QTS 上 /share 是 16MB 的 tmpfs，
-#    挂进去只见空目录、写进去全占内存（会触发「系统存储空间不足」弹窗）。
-#    要挂卷根就挂 /share/CACHEDEVx_DATA 这种真实卷。
-# 2) ports 段与 network_mode: host 二选一，同时写 compose 直接报错。
-#    host 模式下删掉 ports（容器直接占用宿主机 6080/6081）。
-#
-# QNAP 用户示例（把 ${NAS_SHARE:-./data/nas} 换成真实路径，如 /share/CACHEDEV2_DATA）：
-#   volumes:
-#     - /share/Container/115NAS/data/config:/config
-#     - /share/Container/115NAS/data/appdata:/appdata
-#     - /share/Container/115NAS/data/cache:/cache
-#     - /share/Container/115NAS/logs:/logs
-#     - /share/CACHEDEV2_DATA:/media/nas
-#     - /share/Public/Downloads:/root/Downloads
 services:
   115nas:
     # 默认本地构建镜像。想直接用发布版（ghcr.io / Docker Hub）：
