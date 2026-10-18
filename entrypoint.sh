@@ -203,16 +203,26 @@ fi
 
 # ---------------------------------------------------------------- 5. websockify
 # noVNC 静态页 + WebSocket→RFB 桥。不带 --cert 即纯 HTTP。
-websockify --web "$NOVNC_WEB" "$HTTP_PORT" "127.0.0.1:$VNC_PORT" \
+#
+# --heartbeat：定期向客户端发 ping。放在反向代理后面时，很多反代会按空闲时间
+# 掐断 WebSocket（nginx 默认 60s read timeout），表现为画面用着用着突然
+#「无法连接到服务器」。部分老版本 websockify 没有该参数，先探测再启用。
+WS_EXTRA=""
+if websockify --help 2>&1 | grep -q -- "--heartbeat"; then
+    WS_EXTRA="--heartbeat 30"
+fi
+# shellcheck disable=SC2086
+websockify --web "$NOVNC_WEB" $WS_EXTRA "$HTTP_PORT" "127.0.0.1:$VNC_PORT" \
     >"$LOG_DIR/websockify.log" 2>&1 &
 WS_PID=$!
-log "noVNC (HTTP) on :$HTTP_PORT (pid $WS_PID)"
+log "noVNC (HTTP) on :$HTTP_PORT (pid $WS_PID)${WS_EXTRA:+, args:$WS_EXTRA}"
 
 # HTTPS：仅当挂载了证书（把宿主机的 PEM 证书+私钥合一文件放到 /certs/server.pem）。
 if [ -f "$HTTPS_CERT" ] \
    && grep -q "BEGIN CERTIFICATE" "$HTTPS_CERT" 2>/dev/null \
    && grep -q "PRIVATE KEY" "$HTTPS_CERT" 2>/dev/null; then
-    websockify --web "$NOVNC_WEB" --cert "$HTTPS_CERT" --ssl-only \
+    # shellcheck disable=SC2086
+    websockify --web "$NOVNC_WEB" $WS_EXTRA --cert "$HTTPS_CERT" --ssl-only \
         "$HTTPS_PORT" "127.0.0.1:$VNC_PORT" \
         >"$LOG_DIR/websockify-ssl.log" 2>&1 &
     WSS_PID=$!

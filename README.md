@@ -91,12 +91,86 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 
 > 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动就本地构建。
 
+## 外网访问（反向代理）
+
+noVNC 是「静态页 + WebSocket」两条通道：页面走 HTTP，画面走 WebSocket。
+**反代必须转发 WebSocket 的 `Upgrade` / `Connection` 头**，否则页面能打开、
+却顶一条红色「无法连接到服务器」——这就是没转发 WS 的典型症状。
+
+noVNC 默认在同域名同端口的 `/websockify` 建 WS 连接（由页面路径决定）。
+
+nginx 最小可用配置（示例：宿主 6088 → 容器 6080）：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 6088;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://192.168.3.96:6080;
+        proxy_http_version 1.1;
+
+        # 关键两行：少了就是「无法连接到服务器」
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 长连接：关缓冲、放宽空闲超时，否则会话会被反代掐断
+        proxy_buffering     off;
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+    }
+}
+```
+
+平台自带反代：群晖 DSM「反向代理 → 自定义标题 → WebSocket」要勾上；
+QNAP QTS「应用程序 → 反向代理」直连目标端口即可（QTS 5.x 转发 Upgrade）。
+
+**30 秒自检**（在局域网另一台机器上执行，A、B 都应返回 `101 Switching Protocols`）：
+
+```bash
+# A. 直连容器
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
+     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
+     http://192.168.3.96:6080/websockify
+
+# B. 走反代
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
+     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
+     http://example.com:6088/websockify
+```
+
+| A 直连 | B 反代 | 结论 |
+| --- | --- | --- |
+| 101 | 101 | 反代没问题，Ctrl+F5 清 noVNC 缓存后重试 |
+| 101 | 200 / 400 / 404 / 502 | 反代没转发 WS：按上面 nginx 配置补 `Upgrade` / `Connection` |
+| 101 | 超时 / 拒绝 | 6088 没映射或防火墙拦了 |
+| 非 101 | 任意 | 容器侧问题：`docker logs 115nas`、`/logs/websockify.log` |
+
+> 反代改写了路径（如额外加了 `/115nas/` 前缀）时，可在 noVNC 地址后加
+> `&path=websockify` 手动指定 WS 端点。
+
+**公网暴露的安全底线**：noVNC / websockify 本身**没有账号体系**，谁打开页面谁就能
+操作你的 115 账号。务必：① 设 `VNC_PASSWORD=<强密码>`（连接时需输入）；
+② 前置 HTTPS（挂证书到 `/certs/server.pem` 走 6081，或在反代层终结 TLS）；
+③ 能限 IP 就限 IP，或只走 VPN / Tailscale，不要裸暴露到公网。
+
 ## 排障
 
 | 现象 | 排查 |
 | --- | --- |
 | 打开 6080 显示「拒绝连接」 | `docker ps -a` 看容器状态；`docker logs 115nas` 看原因；首次启动后镜像还在构建 |
-| 界面一直转圈连不上 | 看容器内 `/logs/entrypoint.log`、`x11vnc.log`、`websockify.log` |
+| 页面能开、顶部红条「无法连接到服务器」 | 反代没转发 WebSocket，见「外网访问（反向代理）」自检表 |
+| 界面一直转圈连不上 | 看容器内 `/logs/entrypoint.log`、`/logs/xvnc.log`、`/logs/websockify.log` |
 | 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
 | 下载的文件不在 NAS 上 | 客户端设置里下载目录指回 `/root/Downloads`；检查 `NAS_SHARE` 挂载 |
 | 中文输不进去 | `Ctrl+Space` 呼出 fcitx5；不行就 `Ctrl+V` 粘贴 |
