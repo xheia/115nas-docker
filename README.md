@@ -2,7 +2,7 @@
 
 全AI生成，把 **115 生活官方 Linux 桌面客户端**（`115Life_37.3.1.deb`）跑进 Docker 容器，  
 通过浏览器（noVNC）直接使用：**扫码登录、文件浏览/管理、上传、下载、云下载、  
-在线播放、分享**，官方客户端全功能保留，无需在电脑上装任何软件。
+在线播放、分享**，官方客户端全功能保留，减少风控危险，无需在电脑上装任何软件。
 
 - 一条 `docker compose up -d` 完成部署（首次构建约 5-15 分钟）
 - 浏览器打开 `http://<主机IP>:6080/` 即用，自动进入客户端
@@ -108,7 +108,6 @@ image: ghcr.io/xheia/115nas-docker:1.1.0
 | 下载的文件不在 NAS 上    | 下载目录被改过——客户端设置里指回 `/root/Downloads`；或检查 `NAS_SHARE` 挂载        |
 | 中文输不进去           | `Ctrl+Space` 呼出 fcitx5；不行就用 `Ctrl+V` 粘贴                       |
 | 端口 6080 被占用      | 改 `HTTP_PORT` 并同步 compose 的 ports 映射                          |
-| 弹「系统存储空间不足」（QTS） | 系统卷/RAMDisk 紧张：重启 NAS；确认没把 `/share`（tmpfs）挂进容器                |
 | 想重新构建镜像          | `docker compose build --no-cache`                             |
 
 ## 已知限制
@@ -123,7 +122,7 @@ image: ghcr.io/xheia/115nas-docker:1.1.0
 ```
 Dockerfile          镜像定义（debian:12 + X 栈 + fcitx5 + 官方 deb）
 entrypoint.sh       容器入口：dbus→Xvfb→openbox→fcitx5→x11vnc→websockify→Life115
-docker-compose.yml  Compose 编排（含 QNAP 路径示例与两个常见坑注释）
+docker-compose.yml  Compose 编排
 115Life_37.3.1.deb  115 生活官方 Linux 客户端（随仓库分发，构建时 COPY 进镜像）
 .github/workflows/  CI：打版本标签自动构建并推送到 ghcr.io + Docker Hub
 ```
