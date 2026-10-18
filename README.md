@@ -67,7 +67,8 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | `SCREEN_WIDTH` / `SCREEN_HEIGHT` / `SCREEN_DEPTH` | 1280 / 800 / 24 | 虚拟屏分辨率（浏览器端自动缩放） |
 | `HTTP_PORT` / `HTTPS_PORT` | 6080 / 6081 | noVNC 端口（改需同步改 compose 的 ports） |
 | `VNC_PASSWORD` | 空 | noVNC 连接密码。**暴露到公网时务必设置** |
-| `VNC_PORT` | 5900 | x11vnc 端口（仅监听 127.0.0.1，一般不用改） |
+| `VNC_PORT` | 5900 | VNC 服务端口（仅监听 127.0.0.1，一般不用改） |
+| `WS_VERBOSE` | 空 | 设为任意值后 websockify 打印每个请求，用来确认反代有没有把 WS 握手转进来 |
 | `HTTPS_CERT` | `/certs/server.pem` | HTTPS 证书路径 |
 
 ## 镜像仓库与自动更新
@@ -138,26 +139,36 @@ QNAP QTS「应用程序 → 反向代理」直连目标端口即可（QTS 5.x �
 **30 秒自检**（在局域网另一台机器上执行，A、B 都应返回 `101 Switching Protocols`）：
 
 ```bash
+WS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13"
+    -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==")
+
 # A. 直连容器
-curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
-     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
-     http://192.168.3.96:6080/websockify
+curl -i -N --noproxy '*' "${WS[@]}" http://192.168.3.96:6080/websockify
 
 # B. 走反代
-curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
-     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
-     http://example.com:6088/websockify
+curl -i -N --noproxy '*' "${WS[@]}" http://example.com:6088/websockify
 ```
+
+> **必须带 `--noproxy '*'`**：如果本机设了 `http_proxy`（公司代理、Clash 的 HTTP 端口、
+> Windows 系统代理），curl 会把请求交给代理，而 HTTP 代理自己就会剥掉 `Upgrade` /
+> `Connection`，于是**明明服务端正常也会返回 404**——这是个极易误判的假阴性。
+> 同理，浏览器若挂了系统代理访问你的反代，WebSocket 也可能被同样的机制掐掉。
 
 | A 直连 | B 反代 | 结论 |
 | --- | --- | --- |
 | 101 | 101 | 反代没问题，Ctrl+F5 清 noVNC 缓存后重试 |
-| 101 | 200 / 400 / 404 / 502 | 反代没转发 WS：按上面 nginx 配置补 `Upgrade` / `Connection` |
-| 101 | 超时 / 拒绝 | 6088 没映射或防火墙拦了 |
+| 101 | 404 | 反代支持 HTTP 但不转发 WS（`Upgrade` 头被吞）→ 按上面配置补，或改 TCP 端口映射 |
+| 101 | 200 / 400 | 反代改写了路径或强制降级到 HTTP/1.0 |
+| 101 | 502 / 超时 | 后端不可达：反代指向的 IP:端口 不对，或容器没起 |
 | 非 101 | 任意 | 容器侧问题：`docker logs 115nas`、`/logs/websockify.log` |
 
 > 反代改写了路径（如额外加了 `/115nas/` 前缀）时，可在 noVNC 地址后加
 > `&path=websockify` 手动指定 WS 端点。
+
+**反代不支持 WS 时**：任何「HTTP 层」转发都必须显式支持 WebSocket 才能用。若你的
+反代属于不支持的类型（部分内网穿透的 http 模式、部分面板的简单反代），改用
+**TCP 层映射**（路由器端口转发、frp `type=tcp`、NPS tcp 隧道）直接指向容器 6080，
+HTTP 与 WS 一起透传，最省事。
 
 **公网暴露的安全底线**：noVNC / websockify 本身**没有账号体系**，谁打开页面谁就能
 操作你的 115 账号。务必：① 设 `VNC_PASSWORD=<强密码>`（连接时需输入）；
@@ -170,6 +181,7 @@ curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
 | --- | --- |
 | 打开 6080 显示「拒绝连接」 | `docker ps -a` 看容器状态；`docker logs 115nas` 看原因；首次启动后镜像还在构建 |
 | 页面能开、顶部红条「无法连接到服务器」 | 反代没转发 WebSocket，见「外网访问（反向代理）」自检表 |
+| 反代后仍连不上，想确认握手到没到容器 | 加 `WS_VERBOSE=1` 重启容器，`docker logs 115nas`：出现 `WebSocket connection` = 握手已到达；只有 `404` 行 = 头被中间层吞了 |
 | 界面一直转圈连不上 | 看容器内 `/logs/entrypoint.log`、`/logs/xvnc.log`、`/logs/websockify.log` |
 | 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
 | 下载的文件不在 NAS 上 | 客户端设置里下载目录指回 `/root/Downloads`；检查 `NAS_SHARE` 挂载 |

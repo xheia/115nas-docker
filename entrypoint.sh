@@ -211,6 +211,12 @@ WS_EXTRA=""
 if websockify --help 2>&1 | grep -q -- "--heartbeat"; then
     WS_EXTRA="--heartbeat 30"
 fi
+# WS_VERBOSE=1：把每个 HTTP 请求/WebSocket 连接打进容器日志。排查反代是否把
+# 握手转发进来时很有用：看到 "GET /websockify ... 404" 说明 Upgrade 头被中间层
+# 丢了；看到 "WebSocket connection" 说明握手已到容器，问题在别处。
+if [ -n "${WS_VERBOSE:-}" ]; then
+    WS_EXTRA="$WS_EXTRA --verbose"
+fi
 # shellcheck disable=SC2086
 websockify --web "$NOVNC_WEB" $WS_EXTRA "$HTTP_PORT" "127.0.0.1:$VNC_PORT" \
     >"$LOG_DIR/websockify.log" 2>&1 &
