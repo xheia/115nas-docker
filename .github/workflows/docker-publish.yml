@@ -13,6 +13,8 @@ name: Publish Docker image
 #   DOCKERHUB_TOKEN     Docker Hub → Account Settings → Personal access tokens
 #                       （权限 Read/Write/Delete，不是登录密码）
 # ghcr.io 无需额外密钥：自动用 GITHUB_TOKEN。
+#   GHCR_PAT（可选）        带 write:packages 权限的 PAT，用于自动把 ghcr 包设为
+#                           public；不配则首次发布后需手动改 Package settings。
 #
 # 注意：secrets 上下文不能出现在 steps.if 里（GitHub 限制），
 # 故先注入 job 级 env.DH_USER/DH_TOKEN，再用 env 上下文做条件判断。
@@ -91,12 +93,20 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ---- ghcr 包默认 private，尝试改成 public（失败不阻断）----
-      # GITHUB_TOKEN 权限受限，此步可能失败——visibility 是持久属性，手动改一次即可。
+      # 根因（2026-10-18 实测）：GITHUB_TOKEN 是 installation token，PATCH
+      # /user/packages/... 对它返回 404 Not Found——它无法管理用户级包。
+      # 两条路：① 手动改一次（visibility 是持久属性，之后永久保持）；
+      # ② 想要全自动：建一个带 write:packages 权限的 PAT，
+      # 存为仓库 Secret GHCR_PAT，本步会优先使用它。
       - name: Make ghcr package public (best effort)
         continue-on-error: true
+        env:
+          CR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          if [ -n "$CR_PAT" ]; then TOKEN="$CR_PAT"; fi
           RESP=$(curl -sS -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -w "\n%{http_code}" \
             "https://api.github.com/user/packages/container/115nas-docker" \
@@ -104,5 +114,5 @@ jobs:
           echo "response: $RESP"
           case "$RESP" in
             *200|*201) echo "ghcr 包已设为 public" ;;
-            *) echo "自动设置公开失败（GITHUB_TOKEN 权限受限属预期）——手动改：Package settings -> Change visibility -> Public（一次性）" ;;
+            *) echo "自动设置公开失败——visibility 是持久属性，手动改一次即可：Package settings -> Change visibility -> Public" ;;
           esac
