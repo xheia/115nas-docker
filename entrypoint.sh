@@ -11,6 +11,9 @@
 #   HTTP_PORT / HTTPS_PORT     noVNC 对外端口（默认 6080 / 6081）
 #   VNC_PASSWORD               可选；设置后 noVNC 连接需输入密码
 #   HTTPS_CERT                 HTTPS 证书（PEM，证书+私钥合一），默认 /certs/server.pem
+#   WS_PATH                    可选；反代改写路径时指定 noVNC 的 WebSocket 端点
+#                              （如 115nas/websockify），默认 websockify
+#   WS_VERBOSE                 可选；非空则 websockify 打印每个请求（排查反代用）
 #
 # 日志统一写 /logs/（建议挂卷持久化）：
 #   entrypoint.log / xvnc.log / openbox.log / fcitx5.log / x11vnc.log /
@@ -238,12 +241,20 @@ else
 fi
 
 # ---------------------------------------------------------------- 6. 生成入口页
-# noVNC 自带的是 vnc.html；这里生成一个 / 首页，带上自动连接参数。
-# 说明：/usr/share/novnc 由 deb 包提供，容器内可写。
+# 生成的 / 首页做两件事：
+#   ① 用一次真实的 WebSocket 握手做探测——通了才跳 noVNC，不通就直接列出原因；
+#   ② 带上自动连接参数跳 vnc.html。
+#
+# 为什么值得先探测：noVNC 未连接时会把剪贴板、Ctrl/Alt、断开等按钮**整体隐藏**
+# （app/styles/base.css 的 :root:not(.noVNC_connected) #noVNC_clipboard_button 等规则），
+# 侧栏只剩「全屏 + 设置」两个按钮。这种画面极易被误判成「按钮丢了」，
+# 实际含义是「这个会话根本没有连上」——先探测就能把这句话直接说出来。
+#
+# WS_PATH：反代改写了路径（例如额外加了 /115nas/ 前缀）时用它指定 noVNC 的 WS 端点。
 gen_index() {
-    local extra=""
-    [ -n "$VNC_PASSWORD" ] && extra="&password=$(printf '%s' "$VNC_PASSWORD" | sed 's/[&=%]/\\&/g')"
-    cat > "$NOVNC_WEB/index.html" <<EOF
+    local qs="autoconnect=1&resize=scale&quality=6&compression=3&reconnect=1&reconnect_delay=3000&show_dot=1"
+
+    cat > "$NOVNC_WEB/index.html" <<'HTMLEOF'
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -251,19 +262,153 @@ gen_index() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>115 生活</title>
 <style>
-  body { margin:0; background:#f5f6f8; color:#333; font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif; }
-  .tip { padding:10px 14px; font-size:13px; color:#666; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#f5f6f8; color:#1f2328; padding:20px;
+         font-family:"Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif; }
+  .card { width:min(94vw,700px); background:#fff; border:1px solid #e3e6ea; border-radius:12px;
+          padding:22px 24px; box-shadow:0 6px 24px rgba(0,0,0,.06); }
+  h1 { margin:0 0 2px; font-size:18px; }
+  .sub { margin:0 0 16px; font-size:12px; color:#8a9199; }
+  p { margin:10px 0; font-size:14px; line-height:1.6; }
+  #msg { font-weight:600; }
+  .mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; color:#57606a;
+          background:#f6f8fa; border:1px solid #eaeef2; border-radius:6px; padding:8px 10px;
+          word-break:break-all; font-weight:400; }
+  .bad { color:#b42318; }
+  .ok { color:#0f7b0f; }
+  button { font:inherit; font-size:13px; padding:7px 14px; margin:10px 8px 0 0; cursor:pointer;
+           border:1px solid #d0d7de; border-radius:8px; background:#f6f8fa; }
+  button.primary { background:#0969da; border-color:#0969da; color:#fff; }
+  .hide { display:none; }
+  ul { margin:14px 0 0; padding-left:20px; font-size:13px; line-height:1.8; color:#3b4249; }
+  li { margin-bottom:7px; }
+  code { font-family:ui-monospace,Consolas,monospace; font-size:12px; background:#f6f8fa;
+         border:1px solid #eaeef2; border-radius:4px; padding:1px 5px; color:#0a3069; }
 </style>
-<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&resize=scale&quality=6&compression=3&reconnect=1&reconnect_delay=3000&show_dot=1${extra}">
 </head>
 <body>
-<div class="tip">正在进入 115 生活…如长时间停留请 <a href="vnc.html?autoconnect=1&resize=scale&quality=6&compression=3&reconnect=1&reconnect_delay=3000&show_dot=1${extra}">点此重试</a>。</div>
+<div class="card">
+  <h1>115 生活</h1>
+  <p class="sub">先确认到 VNC 的 WebSocket 通道，再进入桌面</p>
+  <p id="msg">检测中…</p>
+  <p id="url" class="mono"></p>
+  <div id="actions" class="hide">
+    <button class="primary" onclick="location.reload()">重新检测</button>
+    <button onclick="location.replace('vnc.html?' + QS)">仍然进入 noVNC</button>
+  </div>
+  <ul id="hints" class="hide">
+    <li>能看到这个页面 = <b>HTTP 转发是通的</b>，卡住的只是 WebSocket 升级这一段。</li>
+    <li><b>nginx</b>：需要 <code>proxy_http_version 1.1;</code>
+        <code>proxy_set_header Upgrade $http_upgrade;</code>
+        <code>proxy_set_header Connection $connection_upgrade;</code>
+        （配合 <code>map $http_upgrade $connection_upgrade</code>），并关闭 <code>proxy_buffering</code>。</li>
+    <li><b>QNAP / 威联通「反向代理」</b>：源协议选 <b>WebSocket 与 HTTP</b>、目标协议选
+        <b>WebSocket</b>；两端都选纯 HTTP 时 Upgrade 会被吃掉，正好产生现在这个现象。</li>
+    <li><b>群晖 DSM</b>：反向代理 → 编辑 → 自定义标题 → 点「WebSocket」按钮自动补两条头。</li>
+    <li><b>Cloudflare</b>：橙色云支持 WebSocket，但只监听固定端口（HTTPS 443 / 2053 / 2083 /
+        2087 / 2096 / 8443）；6088 这类端口必须靠 Tunnel 映射，或路由器把 443 转到 NAS。</li>
+    <li><b>路径被改写</b>：反代若加了前缀（如 <code>/115nas/</code>），给容器设
+        <code>WS_PATH=115nas/websockify</code> 后重启。</li>
+    <li><b>命令行自检</b>：<code>curl -i -N --noproxy '*' -H "Connection: Upgrade"
+        -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13"
+        -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" &lt;本页地址&gt;websockify</code>
+        必须返回 <code>HTTP/1.1 101</code>；返回 404 就是升级头被中间层剥掉了。
+        <code>--noproxy '*'</code> 不能省，否则本机代理会吃掉升级头，出现假阴性。</li>
+    <li>实在绕不过去：改用 <b>TCP 层映射</b>（路由器端口转发 / frp <code>type=tcp</code>）
+        直接指向容器 6080，HTTP 与 WS 一起透传。</li>
+  </ul>
+</div>
+<script>
+var QS = "__QS__";
+var WSPATH = "__WSPATH__";
+
+(function () {
+    if (/[?&]direct=1/.test(location.search)) { location.replace('vnc.html?' + QS); return; }
+
+    var msg   = document.getElementById('msg');
+    var urlEl = document.getElementById('url');
+    var acts  = document.getElementById('actions');
+    var hints = document.getElementById('hints');
+
+    var base = location.href.split('#')[0].split('?')[0].replace(/[^/]*$/, '');
+    var rel  = (WSPATH || 'websockify').replace(/^\/+/, '');
+    var wsUrl;
+    try { wsUrl = new URL(rel, base).href.replace(/^http/, 'ws'); }
+    catch (e) { wsUrl = base + rel; }
+    urlEl.textContent = wsUrl;
+
+    var settled = false;
+    function finish(ok, reason) {
+        if (settled) return;
+        settled = true;
+        if (ok) {
+            msg.className = 'ok';
+            msg.textContent = '连接正常，正在进入…';
+            setTimeout(function () { location.replace('vnc.html?' + QS); }, 300);
+            return;
+        }
+        msg.className = 'bad';
+        msg.textContent = '无法建立 WebSocket 连接：' + reason;
+        acts.className  = '';
+        hints.className = '';
+    }
+
+    var ws, timer;
+    try { ws = new WebSocket(wsUrl); }
+    catch (e) { finish(false, '地址无法建立连接（' + e.message + '）'); return; }
+
+    timer = setTimeout(function () {
+        finish(false, '15 秒内没有完成握手（超时：代理未转发，或后端不可达）');
+        try { ws.close(); } catch (e) {}
+    }, 15000);
+
+    ws.onopen = function () {
+        clearTimeout(timer);
+        finish(true);
+        try { ws.close(); } catch (e) {}
+    };
+    ws.onerror = function () {
+        clearTimeout(timer);
+        finish(false, '握手被拒绝或被中断（Upgrade 头很可能被中间层剥掉了）');
+    };
+    ws.onclose = function (ev) {
+        clearTimeout(timer);
+        finish(false, '连接被关闭（code ' + ev.code + '）');
+    };
+})();
+</script>
 </body>
 </html>
-EOF
+HTMLEOF
+
+    # 注入运行期变量：用 python3 做字符串替换 + 百分号编码，避免密码里的
+    # & = % 反斜杠 等字符破坏 URL 或 JS 字符串。python3 一定在（websockify 依赖它），
+    # sed 那条只是兜底（密码含特殊字符时可能不准）。
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$NOVNC_WEB/index.html" "$qs" "${VNC_PASSWORD:-}" "${WS_PATH:-}" <<'PYEOF'
+import io, sys
+from urllib.parse import quote
+
+path, qs, pw, ws_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+if pw:
+    qs += "&password=" + quote(pw, safe="")
+if ws_path:
+    qs += "&path=" + quote(ws_path, safe="")
+
+# 嵌入 JS 双引号字符串，转义反斜杠与双引号
+js_qs = qs.replace('\\', '\\\\').replace('"', '\\"')
+
+s = io.open(path, encoding='utf-8').read()
+s = s.replace('__QS__', js_qs).replace('__WSPATH__', ws_path.replace('\\', '\\\\').replace('"', '\\"'))
+io.open(path, 'w', encoding='utf-8').write(s)
+PYEOF
+    else
+        sed -i "s#__QS__#$qs#g; s#__WSPATH__#${WS_PATH:-}#g" "$NOVNC_WEB/index.html"
+    fi
 }
 gen_index
-log "entry page generated at $NOVNC_WEB/index.html"
+log "entry page generated at $NOVNC_WEB/index.html (probes WebSocket before entering)"
 
 # ---------------------------------------------------------------- 7. Life115
 # 崩溃退出时记录并重启，保持容器可用（日志在 /logs/life115.log）。

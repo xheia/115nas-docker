@@ -68,6 +68,7 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | `HTTP_PORT` / `HTTPS_PORT` | 6080 / 6081 | noVNC 端口（改需同步改 compose 的 ports） |
 | `VNC_PASSWORD` | 空 | noVNC 连接密码。**暴露到公网时务必设置** |
 | `VNC_PORT` | 5900 | VNC 服务端口（仅监听 127.0.0.1，一般不用改） |
+| `WS_PATH` | `websockify` | noVNC 的 WebSocket 端点。反代改写路径（加前缀）时改这里，如 `115nas/websockify` |
 | `WS_VERBOSE` | 空 | 设为任意值后 websockify 打印每个请求，用来确认反代有没有把 WS 握手转进来 |
 | `HTTPS_CERT` | `/certs/server.pem` | HTTPS 证书路径 |
 
@@ -96,7 +97,11 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 
 noVNC 是「静态页 + WebSocket」两条通道：页面走 HTTP，画面走 WebSocket。
 **反代必须转发 WebSocket 的 `Upgrade` / `Connection` 头**，否则页面能打开、
-却顶一条红色「无法连接到服务器」——这就是没转发 WS 的典型症状。
+却顶一条红色「无法连接到服务器」。
+
+> 容器首页现在会**先做一次 WebSocket 探测**：通了才进桌面，不通就直接在页面上
+> 写明尝试的地址与原因（还会列出各平台的改法）。看到那张诊断页，就已经知道
+> 是「WS 升级被吃掉」而不是别的问题了。想跳过探测直接进：地址后加 `?direct=1`。
 
 noVNC 默认在同域名同端口的 `/websockify` 建 WS 连接（由页面路径决定）。
 
@@ -133,8 +138,16 @@ server {
 }
 ```
 
-平台自带反代：群晖 DSM「反向代理 → 自定义标题 → WebSocket」要勾上；
-QNAP QTS「应用程序 → 反向代理」直连目标端口即可（QTS 5.x 转发 Upgrade）。
+### 平台自带反代
+
+| 平台 | 必须做的设置 |
+| --- | --- |
+| **QNAP / 威联通**（控制台 → 网络和文件服务 → 网络访问 → 反向代理） | 编辑规则，把**源协议**从 `HTTP` 改成 **`WebSocket 与 HTTP`**，**目标协议**改成 **`WebSocket`**，目标仍是 `localhost:6080`。两端都留纯 `HTTP` 时 Upgrade 会被吞掉——页面能开、WS 必失败 |
+| **群晖 DSM**（反向代理 → 编辑 → 自定义标题） | 点「**WebSocket**」按钮自动补 `Upgrade` / `Connection` 两条头，并勾选 HTTP/1.1 |
+| **Cloudflare**（橙色云 / Tunnel） | 支持 WebSocket，但**只监听固定端口**：HTTPS `443/2053/2083/2087/2096/8443`，HTTP `80/8080/8880/2052/2082/2086/2095`。`6088` 这类端口只能靠 Tunnel（`cloudflared` 指到 `http://<NAS>:6080`，绕过 NAS 上任何 HTTP 反代最稳），或在路由器把上述端口转到 NAS |
+
+> QNAP 上如果「WebSocket 与 HTTP」这条规则起来后静态页 502，说明该模式只做 WS，
+> 那就干脆**别用 QTS 反代**：让 Cloudflare Tunnel / 内网穿透直接指向容器 `6080`。
 
 **30 秒自检**（在局域网另一台机器上执行，A、B 都应返回 `101 Switching Protocols`）：
 
@@ -162,8 +175,8 @@ curl -i -N --noproxy '*' "${WS[@]}" http://example.com:6088/websockify
 | 101 | 502 / 超时 | 后端不可达：反代指向的 IP:端口 不对，或容器没起 |
 | 非 101 | 任意 | 容器侧问题：`docker logs 115nas`、`/logs/websockify.log` |
 
-> 反代改写了路径（如额外加了 `/115nas/` 前缀）时，可在 noVNC 地址后加
-> `&path=websockify` 手动指定 WS 端点。
+> 反代改写了路径（如额外加了 `/115nas/` 前缀）时，给容器设
+> `WS_PATH=115nas/websockify` 再重启（等价于在 noVNC 地址后加 `&path=...`）。
 
 **反代不支持 WS 时**：任何「HTTP 层」转发都必须显式支持 WebSocket 才能用。若你的
 反代属于不支持的类型（部分内网穿透的 http 模式、部分面板的简单反代），改用
@@ -181,6 +194,7 @@ HTTP 与 WS 一起透传，最省事。
 | --- | --- |
 | 打开 6080 显示「拒绝连接」 | `docker ps -a` 看容器状态；`docker logs 115nas` 看原因；首次启动后镜像还在构建 |
 | 页面能开、顶部红条「无法连接到服务器」 | 反代没转发 WebSocket，见「外网访问（反向代理）」自检表 |
+| noVNC 侧栏只剩「全屏」「设置」两个按钮 | **不是按钮丢了，是根本没连上**：noVNC 未连接时会整体隐藏剪贴板 / Ctrl / Alt / 断开（`base.css` 的 `:root:not(.noVNC_connected) #noVNC_clipboard_button` 等规则）。按上面的反代章修 WS 即可，按钮会自己回来 |
 | 反代后仍连不上，想确认握手到没到容器 | 加 `WS_VERBOSE=1` 重启容器，`docker logs 115nas`：出现 `WebSocket connection` = 握手已到达；只有 `404` 行 = 头被中间层吞了 |
 | 界面一直转圈连不上 | 看容器内 `/logs/entrypoint.log`、`/logs/xvnc.log`、`/logs/websockify.log` |
 | 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
