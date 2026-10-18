@@ -18,6 +18,8 @@
 #     - /share/Public/Downloads:/root/Downloads
 services:
   115nas:
+    # 默认本地构建镜像。想直接用发布版（ghcr.io / Docker Hub）：
+    # 删掉下面 build: . 一行，并把 image 改成 ghcr.io/xheia/115nas-docker:1.1.0
     build: .
     image: 115nas:1.1.0
     container_name: 115nas

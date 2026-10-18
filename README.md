@@ -84,6 +84,43 @@ docker save -o 115nas-image-1.1.0.tar 115nas:1.1.0
 docker load -i 115nas-image-1.1.0.tar
 ```
 
+## 镜像仓库（ghcr.io / Docker Hub）
+
+每次打版本标签，GitHub Actions 自动构建并推送到两个仓库：
+
+```bash
+ghcr.io/xheia/115nas-docker:1.1.0
+xheia/115nas-docker:1.1.0            # Docker Hub
+```
+
+发布方式（任选一）：
+
+```bash
+git tag v1.1.0 && git push origin v1.1.0      # 打标签即触发
+# 或在 GitHub 仓库页：Actions → Publish Docker image → Run workflow
+```
+
+流水线见 `.github/workflows/docker-publish.yml`。**首次发布 Docker Hub 前**需在仓库
+Settings → Secrets and variables → Actions 添加两个 Secret：
+
+| Secret | 值 |
+|---|---|
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
+| `DOCKERHUB_TOKEN` | Docker Hub → Account Settings → Personal access tokens（Read/Write/Delete，**不是登录密码**） |
+
+ghcr.io 无需配置（自动用 `GITHUB_TOKEN`）；若未配 Docker Hub 密钥，则只发布 ghcr。
+ghcr 包首次推送后如仍是 private，流水线会尝试自动改为 public，也可在
+Package settings 里手动改。
+
+使用发布版镜像（跳过本地构建）：把 compose 里的 `build: .` 删掉，`image:` 改为
+
+```yaml
+image: ghcr.io/xheia/115nas-docker:1.1.0
+```
+
+> 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动时用上面
+> 「镜像导出与迁移」的 tar 文件，或本地构建。
+
 ## 在 QNAP（QTS / Container Station）上使用
 
 Container Station →「创建应用程序」→ 导入本目录的 `docker-compose.yml`
@@ -126,6 +163,7 @@ Dockerfile          镜像定义（debian:12 + X 栈 + fcitx5 + 官方 deb）
 entrypoint.sh       容器入口：dbus→Xvfb→openbox→fcitx5→x11vnc→websockify→Life115
 docker-compose.yml  Compose 编排（含 QNAP 路径示例与两个常见坑注释）
 115Life_37.3.1.deb  115 生活官方 Linux 客户端（随仓库分发，构建时 COPY 进镜像）
+.github/workflows/  CI：打版本标签自动构建并推送到 ghcr.io + Docker Hub
 ```
 
 ## 版权与许可
