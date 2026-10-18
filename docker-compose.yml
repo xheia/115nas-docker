@@ -5,7 +5,7 @@ services:
     # 每天检查 115 官方 Linux 客户端版本，有新版本就重建并更新 latest，
     # 所以 docker compose pull && docker compose up -d 即可跟随官方更新。
     # - 想锁定版本：把 :latest 改成具体 tag（如 :1.1.0，对应 115Life 37.3.1）
-    # - 想本地构建：取消下面 build: . 的注释，并把 image 改回 115nas:1.1.0
+    # - 想本地构建：取消下面 build: . 的注释，并把 image 改回 115nas-docker:1.1.0
     #build: .   #本地构建镜像
     image: ghcr.io/xheia/115nas-docker:latest
     container_name: 115nas

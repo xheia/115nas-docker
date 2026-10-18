@@ -24,7 +24,7 @@ http://<主机IP>:6080/
 不用 compose，等价 `docker run`：
 
 ```bash
-docker build -t 115nas:latest .
+docker build -t 115nas-docker:latest .
 
 docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
   -p 6080:6080 -p 6081:6081 \
@@ -32,7 +32,7 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
   -v ./data/config:/config -v ./data/appdata:/appdata \
   -v ./data/cache:/cache -v ./logs:/logs \
   -v /share/Download:/media/nas -v /share/Download:/root/Downloads \
-  115nas:latest
+  115nas-docker:latest
 ```
 
 ## 中文输入
