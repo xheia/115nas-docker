@@ -35,14 +35,19 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
   115nas-docker:latest
 ```
 
-## 中文输入
+## 中文输入与剪贴板
 
-1. 在 noVNC 窗口里点一下输入框
-2. 按 `Ctrl+Space` 呼出输入法
-3. 打拼音，候选项显示在虚拟屏上，**数字键选字**
+**容器内输入法**：在 noVNC 窗口里点输入框 → `Ctrl+Space` 呼出 fcitx5 → 打拼音、
+**数字键选字**（候选项直接显示在虚拟屏上）。
 
-任何场景都可以用「电脑上复制 → noVNC 窗口内 `Ctrl+V` 粘贴」兜底
-（noVNC 不传输本机输入法，但剪贴板是通的）。
+**剪贴板**：容器用 TigerVNC 的 `Xtigervnc` 作显示栈，支持 RFB 的 Extended Clipboard
+扩展，剪贴板按 **UTF-8** 传输，**中文双向复制粘贴不再乱码**。
+
+> 老版本用 `x11vnc`，它不支持该扩展，只能退回标准 `ClientCutText`
+> （RFC 6143 §7.5.6，仅 ISO-8859-1），中文会被逐字截断到低 8 位而乱码。
+
+> 部分浏览器的异步剪贴板 API 仅在 HTTPS / localhost 下可用；若通过
+> `http://<IP>:6080` 访问时剪贴板不可用，改用 HTTPS（挂证书到 `/certs/server.pem`）。
 
 ## 目录与配置
 
@@ -95,6 +100,7 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
 | 下载的文件不在 NAS 上 | 客户端设置里下载目录指回 `/root/Downloads`；检查 `NAS_SHARE` 挂载 |
 | 中文输不进去 | `Ctrl+Space` 呼出 fcitx5；不行就 `Ctrl+V` 粘贴 |
+| 粘贴/复制中文乱码 | 看日志 `display:` 一行：应为 `tigervnc`；若显示 `x11vnc` 说明 TigerVNC 未装上，重构建镜像 |
 | 端口 6080 被占用 | 改 `HTTP_PORT` 并同步 compose 的 ports 映射 |
 
 ## 已知限制

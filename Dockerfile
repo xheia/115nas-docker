@@ -6,9 +6,17 @@
 # 扫码登录、文件浏览/管理、上传、下载、云下载、在线播放、分享，全功能保留。
 #
 # 进程栈（entrypoint.sh 依次拉起）：
-#   dbus → Xvfb(:99) → openbox → fcitx5(中文输入) → x11vnc(仅127.0.0.1)
-#   → websockify(6080/6081) → Life115
+#   dbus → Xtigervnc(:99) → openbox → fcitx5(中文输入) → websockify(6080/6081)
+#   → Life115
 #
+# 显示栈选型：TigerVNC 的 Xtigervnc = 虚拟屏 + VNC 服务端二合一，
+# 替代原来的 Xvfb + x11vnc。关键原因：x11vnc 0.9.16 未实现 RFB 的
+# Extended Clipboard 伪编码（0xC0A1E5CE，2016 年并入协议主分支），
+# 客户端只能退回标准 ClientCutText（RFC 6143 §7.5.6，仅 ISO-8859-1），
+# 中文等 Latin-1 外字符会被逐字截断到低 8 位而乱码。
+# Xtigervnc 支持该扩展，noVNC 1.2.0+ 亦支持，双方自动协商 UTF-8 传输。
+# x11vnc 仍保留在镜像里作为回退（若 TigerVNC 无法启动）。
+
 # 基础镜像选型：debian:12-slim。官方 115Life_37.3.1.deb 的 Depends 同时要求：
 #   * libwebkit2gtk-4.1-0（WebKitGTK 4.1 API，登录二维码 WebView 用）
 #   * libgtk-3-0 / libssl3（未改名的旧包名）
@@ -55,12 +63,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     QT_IM_MODULE=fcitx \
     XMODIFIERS=@im=fcitx
 
+# 显示栈：优先用 tigervnc-standalone-server 提供的 Xtigervnc（虚拟屏+VNC 二合一，
+# 支持 RFB Extended Clipboard → UTF-8 剪贴板，中文不乱码）。
+# xvfb + x11vnc 保留作为回退路径（x11vnc 0.9.16 无该扩展，中文会乱码）。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl procps psmisc iproute2 \
-      xvfb x11vnc x11-utils xdotool xclip \
+      x11-utils xdotool xclip \
       openbox dbus dbus-x11 \
       novnc websockify \
+      tigervnc-standalone-server xvfb x11vnc \
       fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 \
       libgtk-3-0 libwebkit2gtk-4.1-0 libsecret-1-0 libnotify4 \
       libva2 libva-drm2 libfontconfig1 libssl3 \
