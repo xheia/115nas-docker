@@ -1,0 +1,11 @@
+# 关键：shell/Dockerfile/YAML 一律 LF 行尾。
+# Windows 克隆时 core.autocrlf=true 会把它们转成 CRLF，导致容器内
+# entrypoint.sh 无法执行（shebang 带 \r）。显式锁 LF。
+*.sh           text eol=lf
+Dockerfile     text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.md           text eol=lf
+
+# 官方 deb 是二进制，绝不做行尾转换
+*.deb          binary
