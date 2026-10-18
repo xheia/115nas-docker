@@ -323,8 +323,10 @@ gen_index() {
         <code>proxy_set_header Upgrade $http_upgrade;</code>
         <code>proxy_set_header Connection $connection_upgrade;</code>
         （配合 <code>map $http_upgrade $connection_upgrade</code>），并关闭 <code>proxy_buffering</code>。</li>
-    <li><b>QNAP / 威联通「反向代理」</b>：源协议选 <b>WebSocket 与 HTTP</b>、目标协议选
-        <b>WebSocket</b>；两端都选纯 HTTP 时 Upgrade 会被吃掉，正好产生现在这个现象。</li>
+    <li><b>QNAP / 威联通「反向代理」</b>：把<b>目标协议</b>从 <code>HTTP</code> 改成
+        <b>HTTP 和 WebSocket</b>（源协议保持 <code>HTTP</code>，目标仍 <code>localhost:6080</code>）。
+        实测这个组合下握手返回 101；两端都留纯 <code>HTTP</code> 时 Upgrade 会被吃掉，
+        正好产生现在这个现象。</li>
     <li><b>群晖 DSM</b>：反向代理 → 编辑 → 自定义标题 → 点「WebSocket」按钮自动补两条头。</li>
     <li><b>Cloudflare</b>：橙色云支持 WebSocket，但只监听固定端口（HTTPS 443 / 2053 / 2083 /
         2087 / 2096 / 8443）；6088 这类端口必须靠 Tunnel 映射，或路由器把 443 转到 NAS。</li>

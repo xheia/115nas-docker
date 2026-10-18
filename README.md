@@ -143,12 +143,13 @@ server {
 
 | 平台 | 必须做的设置 |
 | --- | --- |
-| **QNAP / 威联通**（控制台 → 网络和文件服务 → 网络访问 → 反向代理） | 编辑规则，把**源协议**从 `HTTP` 改成 **`WebSocket 与 HTTP`**，**目标协议**改成 **`WebSocket`**，目标仍是 `localhost:6080`。两端都留纯 `HTTP` 时 Upgrade 会被吞掉——页面能开、WS 必失败 |
+| **QNAP / 威联通**（控制台 → 网络和文件服务 → 网络访问 → 反向代理） | 只改一处：**目标协议** `HTTP` → **`HTTP 和 WebSocket`**（源协议保持 `HTTP`，目标仍 `localhost:6080`）。实测该组合下 WS 握手返回 `101`；两端都留纯 `HTTP` 时 `Upgrade` 被吞——页面能开、WS 必失败 |
 | **群晖 DSM**（反向代理 → 编辑 → 自定义标题） | 点「**WebSocket**」按钮自动补 `Upgrade` / `Connection` 两条头，并勾选 HTTP/1.1 |
 | **Cloudflare**（橙色云 / Tunnel） | 支持 WebSocket，但**只监听固定端口**：HTTPS `443/2053/2083/2087/2096/8443`，HTTP `80/8080/8880/2052/2082/2086/2095`。`6088` 这类端口只能靠 Tunnel（`cloudflared` 指到 `http://<NAS>:6080`，绕过 NAS 上任何 HTTP 反代最稳），或在路由器把上述端口转到 NAS |
 
-> QNAP 上如果「WebSocket 与 HTTP」这条规则起来后静态页 502，说明该模式只做 WS，
-> 那就干脆**别用 QTS 反代**：让 Cloudflare Tunnel / 内网穿透直接指向容器 `6080`。
+> 只改**目标协议**就够了，别把源协议也改成 WebSocket。若你的 QTS 版本里没有
+> 「HTTP 和 WebSocket」这个选项，就别跟它较劲：路由器端口直接转发到 `NAS:6080`
+> 绕过 QTS 反代，或用 Cloudflare Tunnel 直连 `6080`。
 
 ### Cloudflare Zero Trust（Access / Tunnel）
 
