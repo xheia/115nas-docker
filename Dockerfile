@@ -22,6 +22,10 @@ LABEL org.opencontainers.image.title="115nas" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/xheia/115nas-docker"
 
+# 内置 115 客户端版本（CI 通过 --build-arg 传入，docker inspect 可见）
+ARG CLIENT_VERSION=unknown
+LABEL 115nas.client-version="${CLIENT_VERSION}"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \

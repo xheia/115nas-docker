@@ -72,9 +72,19 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | `VNC_PORT`                                        | 5900                | x11vnc 端口（仅监听 127.0.0.1，一般不用改）  |
 | `HTTPS_CERT`                                      | `/certs/server.pem` | HTTPS 证书路径                      |
 
-## 镜像仓库（ghcr.io / Docker Hub）
+## 镜像仓库（ghcr.io / Docker Hub）与自动更新
 
-打版本标签即触发 GitHub Actions 自动构建推送：
+**115 官方客户端更新后，`latest` 标签自动跟进**（无需人工干预）：
+
+- CI 每天 18:00（北京时间）查询 115 官方版本接口
+  `https://appversion.115.com/1/web/1.0/api/getMultiVer` 的 `115Life_Linux` 项
+- 发现新版本 → 自动下载 deb（校验 `dpkg Version` 与文件大小）→ 更新 Dockerfile
+  并提交到 main → 同一流水线内重建镜像 → 推送 `latest`（同时更新 `main`/`edge`）
+- NAS 上跟更新只需：`docker compose pull && docker compose up -d`
+  （compose 默认引用 `:latest`；想锁定版本就改成具体 tag）
+- 手动立即重建：Actions → Publish Docker image → Run workflow
+
+打版本标签则发布固定版本（版本号 + `latest`）：
 
 ```bash
 git tag v1.1.0 && git push origin v1.1.0
@@ -92,11 +102,11 @@ git tag v1.1.0 && git push origin v1.1.0
 使用发布版镜像（跳过本地构建）：把 compose 里的 `build: .` 删掉，`image:` 改为
 
 ```yaml
-image: ghcr.io/xheia/115nas-docker:1.1.0
+image: ghcr.io/xheia/115nas-docker:latest
 ```
 
-> 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动时用上面  
-> 「镜像导出与迁移」的 tar 文件，或本地构建。
+> 国内网络拉取 ghcr.io / docker.io 常需镜像加速或代理；拉不动就本地构建。
+> 镜像内 115 客户端版本可用 `docker inspect --format '{{index .Config.Labels "115nas.client-version"}}' <镜像名>` 查看。
 
 ## 排障
 
@@ -124,7 +134,7 @@ Dockerfile          镜像定义（debian:12 + X 栈 + fcitx5 + 官方 deb）
 entrypoint.sh       容器入口：dbus→Xvfb→openbox→fcitx5→x11vnc→websockify→Life115
 docker-compose.yml  Compose 编排
 115Life_37.3.1.deb  115 生活官方 Linux 客户端（随仓库分发，构建时 COPY 进镜像）
-.github/workflows/  CI：打版本标签自动构建并推送到 ghcr.io + Docker Hub
+.github/workflows/  CI：每天检查 115 官方更新自动重建 latest；打版本标签发布
 ```
 
 ## 版权与许可
