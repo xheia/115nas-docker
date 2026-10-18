@@ -67,7 +67,8 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | `SCREEN_WIDTH` / `SCREEN_HEIGHT` / `SCREEN_DEPTH` | 1280 / 800 / 24 | 虚拟屏分辨率（浏览器端自动缩放） |
 | `HTTP_PORT` / `HTTPS_PORT` | 6080 / 6081 | noVNC 端口（改需同步改 compose 的 ports） |
 | `VNC_PASSWORD` | 空 | noVNC 连接密码。**暴露到公网时务必设置** |
-| `VNC_PORT` | 5900 | VNC 服务端口（仅监听 127.0.0.1，一般不用改） |
+| `VNC_PORT` | 5900 | VNC 服务端口，仅监听 127.0.0.1，一般不用改 |
+| `VNC_BIND` | `127.0.0.1` | VNC 监听地址。设 `0.0.0.0` 才会对外开放 5900（给原生 VNC 客户端或 Cloudflare 浏览器渲染 VNC 用）——**必须先设 `VNC_PASSWORD`，否则容器拒绝启动** |
 | `WS_PATH` | `websockify` | noVNC 的 WebSocket 端点。反代改写路径（加前缀）时改这里，如 `115nas/websockify` |
 | `WS_VERBOSE` | 空 | 设为任意值后 websockify 打印每个请求，用来确认反代有没有把 WS 握手转进来 |
 | `HTTPS_CERT` | `/certs/server.pem` | HTTPS 证书路径 |
@@ -149,6 +150,41 @@ server {
 > QNAP 上如果「WebSocket 与 HTTP」这条规则起来后静态页 502，说明该模式只做 WS，
 > 那就干脆**别用 QTS 反代**：让 Cloudflare Tunnel / 内网穿透直接指向容器 `6080`。
 
+### Cloudflare Zero Trust（Access / Tunnel）
+
+**应用类型要选「自托管（Self-hosted）」，不要选 `VNC` 类型 + 「浏览器渲染」。**
+
+「浏览器渲染」的 VNC/SSH/RDP 是 **Cloudflare 自己当客户端**：它连的是 origin 的
+**原始 VNC 端口 5900**，把画面重新编码后推给你——和 noVNC 的「HTTP 页面 + WebSocket」
+是两条完全不同的路。用那种配置时，页面虽然能渲染出来，noVNC 的 WS 却永远建不起来
+（侧栏只剩「全屏 + 设置」两个按钮就是这个现象）。
+
+自托管应用 = 普通反向代理 + 登录墙，`Upgrade` 头原样透传，noVNC 正常工作。
+
+若改用自托管后仍报 `1006` / 不停重连，查这两处（Proxmox 的 noVNC 也是同样的坑）：
+
+1. **主控制台 → 你的域名 → 网络 → WebSockets** 开关要在 ON（默认 ON，个别账户模板会关）；
+2. **cloudflared 的 ingress 加 `http2Origin: false`**——新版 cloudflared 用 HTTP/2 连
+   origin 时，WebSocket 升级可能卡死，浏览器收到 1006：
+
+```yaml
+ingress:
+  - hostname: vnc2.xheic.com
+    service: http://192.168.3.96:6080      # 直接指容器，别经 NAS 上的 HTTP 反代
+    originRequest:
+      http2Origin: false
+  - service: http_status:404
+```
+
+> cloudflared 跑在 NAS 宿主机上就填 `http://localhost:6080`；跑在容器里可用
+> `network_mode: service:115nas` 共享网络后连 `127.0.0.1:6080`。
+
+**另一种玩法：直接用 Cloudflare 的「浏览器渲染 VNC」**
+把 VNC 应用的目标改成 **5900 原始 VNC**（Tunnel 用 `service: tcp://<NAS>:5900`），
+容器需要 `VNC_BIND=0.0.0.0` + `VNC_PASSWORD`，compose 里映射 `- "5900:5900"`。
+好处是彻底不依赖 noVNC/WS；代价是画面被重新编码（有延迟，看视频不舒服），
+剪贴板走 Cloudflare 自己的开关（新建应用默认两个方向都关，要在应用设置里手动打开）。
+
 **30 秒自检**（在局域网另一台机器上执行，A、B 都应返回 `101 Switching Protocols`）：
 
 ```bash
@@ -196,6 +232,7 @@ HTTP 与 WS 一起透传，最省事。
 | 页面能开、顶部红条「无法连接到服务器」 | 反代没转发 WebSocket，见「外网访问（反向代理）」自检表 |
 | noVNC 侧栏只剩「全屏」「设置」两个按钮 | **不是按钮丢了，是根本没连上**：noVNC 未连接时会整体隐藏剪贴板 / Ctrl / Alt / 断开（`base.css` 的 `:root:not(.noVNC_connected) #noVNC_clipboard_button` 等规则）。按上面的反代章修 WS 即可，按钮会自己回来 |
 | 反代后仍连不上，想确认握手到没到容器 | 加 `WS_VERBOSE=1` 重启容器，`docker logs 115nas`：出现 `WebSocket connection` = 握手已到达；只有 `404` 行 = 头被中间层吞了 |
+| Cloudflare 里应用设成了 `VNC` + 「浏览器渲染」 | 那是 CF 自己当 VNC 客户端去连 **5900**，不走 noVNC 的 HTTP/WS → 页面能出、画面永远连不上。改回「自托管」应用，或改指 5900 + `VNC_BIND=0.0.0.0`，见「Cloudflare Zero Trust」 |
 | 界面一直转圈连不上 | 看容器内 `/logs/entrypoint.log`、`/logs/xvnc.log`、`/logs/websockify.log` |
 | 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
 | 下载的文件不在 NAS 上 | 客户端设置里下载目录指回 `/root/Downloads`；检查 `NAS_SHARE` 挂载 |

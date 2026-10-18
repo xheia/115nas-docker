@@ -7,7 +7,10 @@
 #
 # 环境变量（均有默认值，可用 docker -e 覆盖）：
 #   SCREEN_WIDTH/HEIGHT/DEPTH  虚拟屏幕（默认 1280x800x24）
-#   VNC_PORT                   VNC 监听端口（默认 5900，仅 127.0.0.1）
+#   VNC_PORT                   VNC 监听端口（默认 5900）
+#   VNC_BIND                   VNC 监听地址（默认 127.0.0.1，只允许容器内 noVNC 连接）。
+#                              设为 0.0.0.0 才会对外暴露 5900——仅用于「Cloudflare
+#                              浏览器渲染 VNC」或原生 VNC 客户端直连，必须同时设密码
 #   HTTP_PORT / HTTPS_PORT     noVNC 对外端口（默认 6080 / 6081）
 #   VNC_PASSWORD               可选；设置后 noVNC 连接需输入密码
 #   HTTPS_CERT                 HTTPS 证书（PEM，证书+私钥合一），默认 /certs/server.pem
@@ -32,6 +35,9 @@ W=${SCREEN_WIDTH:-1280}
 H=${SCREEN_HEIGHT:-800}
 D=${SCREEN_DEPTH:-24}
 VNC_PORT=${VNC_PORT:-5900}
+# 只允许回环：VNC 协议本身没有账号体系（RFB 密码只是弱共享口令），
+# 暴露到容器外就意味着任何能连到 5900 的人都能操作 115 账号。
+VNC_BIND=${VNC_BIND:-127.0.0.1}
 HTTP_PORT=${HTTP_PORT:-6080}
 HTTPS_PORT=${HTTPS_PORT:-6081}
 VNC_PASSWORD=${VNC_PASSWORD:-}
@@ -89,6 +95,20 @@ fi
 # 保证容器仍然可用（代价是剪贴板退回 Latin-1，日志会明确告警）。
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null
 
+# VNC 绑定地址：默认只监听回环（noVNC 从 127.0.0.1 连进来就够了）。
+# 只有显式 VNC_BIND=0.0.0.0 才放开，并且强制要求密码——RFB 口令是弱共享口令、
+# 可被暴力破解，裸暴露 5900 等于把 115 账号交给扫端口的机器人。
+LOCAL_FLAG="-localhost"
+if [ "$VNC_BIND" != "127.0.0.1" ]; then
+    if [ -z "$VNC_PASSWORD" ]; then
+        log "FATAL: VNC_BIND=$VNC_BIND 会把 VNC($VNC_PORT) 暴露到容器外，但 VNC_PASSWORD 为空。"
+        log "       无密码的 VNC = 谁连上谁就能操作你的 115 账号。请先设置 VNC_PASSWORD 再重启。"
+        exit 1
+    fi
+    LOCAL_FLAG=""
+    log "WARNING: VNC bound to $VNC_BIND (reachable outside the container); keep it behind a tunnel/VPN"
+fi
+
 VNC_MODE=""
 
 wait_vnc_port() {
@@ -117,14 +137,14 @@ start_tigervnc() {
     Xtigervnc ":$DISPLAY_NUM" \
         -geometry "${W}x${H}" -depth "$D" \
         -rfbport "$VNC_PORT" \
-        -localhost \
+        $LOCAL_FLAG \
         -SecurityTypes "$sec" $pw \
         -AlwaysShared -ac -desktop 115nas \
         >"$LOG_DIR/xvnc.log" 2>&1 &
     XVNC_PID=$!
     if wait_vnc_port; then
         VNC_MODE="tigervnc"
-        log "Xtigervnc listening on 127.0.0.1:$VNC_PORT (pid $XVNC_PID)"
+        log "Xtigervnc listening on $VNC_BIND:$VNC_PORT (pid $XVNC_PID)"
         return 0
     fi
     kill "$XVNC_PID" 2>/dev/null
@@ -143,7 +163,7 @@ start_x11vnc() {
         xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
         sleep 0.5
     done
-    VNC_ARGS="-display $DISPLAY -rfbport $VNC_PORT -localhost -forever -shared -xkb -quiet -o $LOG_DIR/x11vnc.log"
+    VNC_ARGS="-display $DISPLAY -rfbport $VNC_PORT $LOCAL_FLAG -forever -shared -xkb -quiet -o $LOG_DIR/x11vnc.log"
     if [ -n "$VNC_PASSWORD" ]; then
         if x11vnc -storepasswd "$VNC_PASSWORD" "$VNC_PASS_FILE" >/dev/null 2>&1; then
             VNC_ARGS="$VNC_ARGS -rfbauth $VNC_PASS_FILE"
@@ -160,7 +180,7 @@ start_x11vnc() {
     VNC_PID=$!
     if wait_vnc_port; then
         VNC_MODE="x11vnc"
-        log "x11vnc listening on 127.0.0.1:$VNC_PORT (pid $VNC_PID)"
+        log "x11vnc listening on $VNC_BIND:$VNC_PORT (pid $VNC_PID)"
         return 0
     fi
     return 1
@@ -425,7 +445,7 @@ LIFE_PID=$!
 
 log "115nas container is up"
 log "  noVNC page : http://<host>:$HTTP_PORT/   (https://<host>:$HTTPS_PORT/)"
-log "  VNC target : 127.0.0.1:$VNC_PORT"
+log "  VNC target : $VNC_BIND:$VNC_PORT (raw VNC; only for direct clients / Cloudflare browser-rendered VNC)"
 log "  display    : $VNC_MODE (tigervnc = UTF-8 clipboard; x11vnc = Latin-1, CJK garbles)"
 
 # ---------------------------------------------------------------- 8. 常驻

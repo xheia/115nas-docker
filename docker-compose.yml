@@ -14,6 +14,8 @@ services:
     ports:
       - "6080:6080"     # noVNC 页面 + WebSocket（HTTP）
       - "6081:6081"     # HTTPS（仅挂载证书时监听）
+      # - "5900:5900"   # 只有用「原生 VNC 客户端直连」或「Cloudflare 浏览器渲染 VNC」
+      #                 # 时才需要：同时要开 VNC_BIND=0.0.0.0 + VNC_PASSWORD，否则容器拒启
     volumes:
       - ./data/config:/config       # 客户端配置与登录态（勿删）
       - ./data/appdata:/appdata     # WebKit Cookie = 扫码登录态（勿删）
@@ -24,5 +26,6 @@ services:
     environment:
       - TZ=Asia/Shanghai
       # - VNC_PASSWORD=yourpassword   # 暴露到公网时务必设置
+      # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端/CF 浏览器渲染 VNC 需要；必须同时设密码
       # - SCREEN_WIDTH=1600           # 虚拟屏分辨率（浏览器端自动缩放）
       # - SCREEN_HEIGHT=900
