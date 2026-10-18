@@ -1,10 +1,10 @@
 # 115nas — 115 生活客户端 Docker 版
 services:
   115nas:
-    # 默认本地构建镜像。想直接用发布版（ghcr.io / Docker Hub）：
+    # 默认直接用发布版（ghcr.io / Docker Hub）：
     # 删掉下面 build: . 一行，并把 image 改成 ghcr.io/xheia/115nas-docker:1.1.0
-    build: .
-    image: 115nas:1.1.0
+    #build: .   #本地构建镜像
+    image: ghcr.io/xheia/115nas-docker:1.1.0
     container_name: 115nas
     restart: unless-stopped
     shm_size: 1g
@@ -16,7 +16,7 @@ services:
       - ./data/appdata:/appdata     # WebKit Cookie = 扫码登录态（勿删）
       - ./data/cache:/cache         # 视频缓存
       - ./logs:/logs
-      - ${NAS_SHARE:-./data/nas}:/media/nas
+      - ${NAS_SHARE:-./data/nas}:/media/nas     #上传目录
       - ${NAS_SHARE:-./data/nas}:/root/Downloads   # 客户端默认下载目录
     environment:
       - TZ=Asia/Shanghai
