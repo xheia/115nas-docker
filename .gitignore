@@ -1,0 +1,14 @@
+# 运行时数据（挂卷产生，勿提交）
+data/
+logs/
+
+# 镜像导出物（GB 级，勿提交）
+*.tar
+*.tar.gz
+
+# 日志
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
