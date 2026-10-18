@@ -66,7 +66,8 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | `TZ` | `Asia/Shanghai` | 时区 |
 | `SCREEN_WIDTH` / `SCREEN_HEIGHT` / `SCREEN_DEPTH` | 1280 / 800 / 24 | 虚拟屏分辨率（浏览器端自动缩放） |
 | `HTTP_PORT` / `HTTPS_PORT` | 6080 / 6081 | noVNC 端口（改需同步改 compose 的 ports） |
-| `VNC_PASSWORD` | 空 | noVNC 连接密码。**暴露到公网时务必设置** |
+| `VNC_PASSWORD` | 空 | noVNC 连接密码（RFB VncAuth）。**暴露到公网时务必设置**；设置后 noVNC 会**弹出密码框**要求输入。生效校验：`docker logs 115nas \| grep "password authentication enabled"` |
+| `VNC_PASSWORD_AUTOLOGIN` | 空 | 设为 `1` 才把密码写进 URL 自动登录（免输入，但口令会留在地址栏/浏览器历史/反代日志里），默认关闭 |
 | `VNC_PORT` | 5900 | VNC 服务端口，仅监听 127.0.0.1，一般不用改 |
 | `VNC_BIND` | `127.0.0.1` | VNC 监听地址。设 `0.0.0.0` 才会对外开放 5900（给原生 VNC 客户端或 Cloudflare 浏览器渲染 VNC 用）——**必须先设 `VNC_PASSWORD`，否则容器拒绝启动** |
 | `WS_PATH` | `websockify` | noVNC 的 WebSocket 端点。反代改写路径（加前缀）时改这里，如 `115nas/websockify` |
@@ -238,6 +239,7 @@ HTTP 与 WS 一起透传，最省事。
 | 扫码后重启要重新扫码 | `/config`、`/appdata` 没挂卷或被删 |
 | 下载的文件不在 NAS 上 | 客户端设置里下载目录指回 `/root/Downloads`；检查 `NAS_SHARE` 挂载 |
 | 中文输不进去 | `Ctrl+Space` 呼出 fcitx5；不行就 `Ctrl+V` 粘贴 |
+| 设了 `VNC_PASSWORD` 却不弹密码框 | 密码没生效。看 `docker logs 115nas`：应有 `password authentication enabled`；**没有就是容器在裸奔**。新版镜像在这种情形会直接拒绝启动（缺 `tigervnc-tools` 时就退化为无认证）。重建镜像并确认日志 |
 | 粘贴/复制中文乱码 | 看日志 `display:` 一行：应为 `tigervnc`；若显示 `x11vnc` 说明 TigerVNC 未装上，重构建镜像 |
 | 端口 6080 被占用 | 改 `HTTP_PORT` 并同步 compose 的 ports 映射 |
 

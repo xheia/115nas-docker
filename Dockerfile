@@ -72,7 +72,9 @@ RUN apt-get update \
       x11-utils xdotool xclip \
       openbox dbus dbus-x11 \
       novnc websockify \
-      tigervnc-standalone-server xvfb x11vnc \
+      # tigervnc-tools 提供 tigervncpasswd：少了它 VNC_PASSWORD 会静默失效
+      #（服务端退化成 SecurityTypes=None，等于公网裸奔），别删
+      tigervnc-standalone-server tigervnc-tools xvfb x11vnc \
       fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 \
       libgtk-3-0 libwebkit2gtk-4.1-0 libsecret-1-0 libnotify4 \
       libva2 libva-drm2 libfontconfig1 libssl3 \

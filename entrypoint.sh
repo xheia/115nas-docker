@@ -125,13 +125,23 @@ start_tigervnc() {
     if [ -n "$VNC_PASSWORD" ]; then
         rm -f "$VNC_PASS_FILE"
         # -f = filter mode：stdin 读明文口令，stdout 输出加密后的口令文件
-        if printf '%s\n' "$VNC_PASSWORD" | tigervncpasswd -f > "$VNC_PASS_FILE" 2>/dev/null \
+        # tigervncpasswd 来自 tigervnc-tools，缺了它整个认证就没了——此时必须
+        # 拒绝启动，而不是“降级为无密码”：那样等于把 115 账号裸挂到公网上，
+        # 而用户从界面上看不出任何区别（这正是踩过的坑）。
+        if command -v tigervncpasswd >/dev/null 2>&1 \
+           && printf '%s\n' "$VNC_PASSWORD" | tigervncpasswd -f > "$VNC_PASS_FILE" 2>/dev/null \
            && [ -s "$VNC_PASS_FILE" ]; then
             sec="VncAuth"; pw="-PasswordFile $VNC_PASS_FILE"
-            log "VNC password authentication enabled"
+            log "VNC password authentication enabled (RFB VncAuth)"
         else
-            log "WARNING: could not store VNC password, starting without password"
+            log "FATAL: VNC_PASSWORD is set but the password could not be stored"
+            log "       (tigervncpasswd missing or failed). Refusing to start without"
+            log "       authentication, because the UI would look identical while the"
+            log "       session is actually open to anyone. Check: tigervncpasswd in PATH?"
+            exit 1
         fi
+    else
+        log "WARNING: no VNC_PASSWORD - the VNC session is unauthenticated"
     fi
     # shellcheck disable=SC2086
     Xtigervnc ":$DISPLAY_NUM" \
@@ -169,11 +179,13 @@ start_x11vnc() {
             VNC_ARGS="$VNC_ARGS -rfbauth $VNC_PASS_FILE"
             log "x11vnc: password authentication enabled"
         else
-            VNC_ARGS="$VNC_ARGS -nopw"
-            log "WARNING: could not store VNC password, falling back to no password"
+            log "FATAL: VNC_PASSWORD is set but x11vnc -storepasswd failed; refusing to"
+            log "       start unauthenticated (see the tigervnc branch for the rationale)"
+            exit 1
         fi
     else
         VNC_ARGS="$VNC_ARGS -nopw"
+        log "WARNING: no VNC_PASSWORD - the VNC session is unauthenticated"
     fi
     # shellcheck disable=SC2086
     x11vnc $VNC_ARGS &
@@ -273,6 +285,15 @@ fi
 # WS_PATH：反代改写了路径（例如额外加了 /115nas/ 前缀）时用它指定 noVNC 的 WS 端点。
 gen_index() {
     local qs="autoconnect=1&resize=scale&quality=6&compression=3&reconnect=1&reconnect_delay=3000&show_dot=1"
+
+    # 默认**不**把密码写进 URL：地址栏、浏览器历史、反代访问日志都会留下它。
+    # 不带 password 参数时，noVNC 收到 RFB 的 credentialsrequired 会自己弹密码框
+    # （ui.js 里 sendCredentials 那段），安全得多，只多一次输入。
+    # 想免输密码自动登录：设 VNC_PASSWORD_AUTOLOGIN=1，代价是口令出现在 URL 里。
+    local auto_pw=""
+    if [ -n "${VNC_PASSWORD_AUTOLOGIN:-}" ] && [ -n "$VNC_PASSWORD" ]; then
+        auto_pw="$VNC_PASSWORD"
+    fi
 
     cat > "$NOVNC_WEB/index.html" <<'HTMLEOF'
 <!DOCTYPE html>
@@ -408,7 +429,7 @@ HTMLEOF
     # & = % 反斜杠 等字符破坏 URL 或 JS 字符串。python3 一定在（websockify 依赖它），
     # sed 那条只是兜底（密码含特殊字符时可能不准）。
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "$NOVNC_WEB/index.html" "$qs" "${VNC_PASSWORD:-}" "${WS_PATH:-}" <<'PYEOF'
+        python3 - "$NOVNC_WEB/index.html" "$qs" "$auto_pw" "${WS_PATH:-}" <<'PYEOF'
 import io, sys
 from urllib.parse import quote
 
