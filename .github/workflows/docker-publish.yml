@@ -238,10 +238,18 @@ jobs:
 
           full = open('README.md', encoding='utf-8').read()
 
-          summary = ('115 生活官方 Linux 客户端 Docker 版：浏览器打开即用（noVNC），'
-                     '内置中文输入法与 UTF-8 剪贴板，扫码登录态持久化。')
-          if len(summary) > 100:                      # Hub 简介上限 100 字符
-              summary = summary[:97] + '...'
+          # 注意：Hub 的这个字段校验的是**字节数**不是字符数（中文一个字 3 字节），
+          # 上限 100 字节。之前按 len() 判字符数，43 个字符 = 151 字节，直接 400。
+          summary = ('115 生活 Linux 客户端 Docker 版：浏览器打开即用，'
+                     '内置中文输入法与剪贴板')
+
+          def btrim(s, limit=100):
+              b = s.encode('utf-8')
+              if len(b) <= limit:
+                  return s
+              return b[:limit - 3].decode('utf-8', 'ignore').rstrip() + '...'
+
+          summary = btrim(summary)
 
           st, body = call(
               f'https://hub.docker.com/v2/repositories/{user}/{repo}/',
