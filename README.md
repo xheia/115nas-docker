@@ -12,12 +12,52 @@
 ## 快速开始
 
 ```bash
-# 1. 构建并启动（NAS_SHARE 指向宿主机目录，客户端下载落地处）
+# 1. 把下面这份 docker-compose.yml 存到任意目录（或直接克隆本仓库）
+# 2. 启动（NAS_SHARE 指向宿主机目录，客户端下载落地处）
 NAS_SHARE=/share/Download docker compose up -d
 
-# 2. 浏览器打开，用 115 App 扫码登录
+# 3. 浏览器打开，用 115 App 扫码登录
 http://<主机IP>:6080/
 ```
+
+`docker-compose.yml`（与仓库根目录的文件一致，可直接复制使用）：
+
+```yaml
+services:
+  115nas:
+    # 默认直接用发布版镜像。latest 由 CI 自动维护：每天检查 115 官方 Linux
+    # 客户端版本，有新版本就重建并更新 latest，所以
+    #   docker compose pull && docker compose up -d
+    # 即可跟随官方更新。
+    # - 想锁定版本：把 :latest 改成具体 tag（如 :1.1.0，对应 115Life 37.3.1）
+    # - 想本地构建：取消 build: . 的注释，并把 image 改回 115nas-docker:1.1.0
+    #build: .   # 本地构建镜像
+    image: ghcr.io/xheia/115nas-docker:latest
+    container_name: 115nas
+    restart: unless-stopped
+    shm_size: 1g
+    ports:
+      - "6080:6080"     # noVNC 页面 + WebSocket（HTTP）
+      - "6081:6081"     # HTTPS（仅挂载证书时监听）
+      # - "5900:5900"   # 只有「原生 VNC 客户端直连」或「Cloudflare 浏览器渲染 VNC」
+      #                 # 才需要；同时要开 VNC_BIND=0.0.0.0 + VNC_PASSWORD，否则容器拒启
+    volumes:
+      - ./data/config:/config       # 客户端配置与登录态（勿删）
+      - ./data/appdata:/appdata     # WebKit Cookie = 扫码登录态（勿删）
+      - ./data/cache:/cache         # 视频缓存
+      - ./logs:/logs
+      - ${NAS_SHARE:-./data/nas}:/media/nas        # 上传目录
+      - ${NAS_SHARE:-./data/nas}:/root/Downloads   # 客户端默认下载目录
+    environment:
+      - TZ=Asia/Shanghai
+      # - VNC_PASSWORD=yourpassword   # 暴露到公网时务必设置
+      # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端/CF 浏览器渲染 VNC 需要，必须同时设密码
+      # - SCREEN_WIDTH=1600           # 虚拟屏分辨率（浏览器端自动缩放）
+      # - SCREEN_HEIGHT=900
+```
+
+> 国内拉取 ghcr.io 慢的话，把 `image` 换成 Docker Hub 的
+> `xheia/115nas-docker:latest`（两边内容一致）。
 
 不用 compose，等价 `docker run`：
 
