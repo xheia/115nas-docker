@@ -201,3 +201,58 @@ jobs:
             *200|*201) echo "ghcr 包已设为 public" ;;
             *) echo "自动设置公开失败——visibility 是持久属性，手动改一次即可：Package settings -> Change visibility -> Public" ;;
           esac
+
+      # ---- 同步 Docker Hub 仓库概述（简介 + 完整说明取自 README）----
+      # 没有这一步时，Docker Hub 上的 description / full_description 长期是空的，
+      # 只能靠手工登录后台粘贴。这里用仓库已有的 DOCKERHUB_* Secret 自动同步：
+      # 每次发布都跟着 README.md 走，不会出现文档和仓库页不一致。
+      - name: Sync Docker Hub description
+        if: ${{ env.DH_USER != '' && env.DH_TOKEN != '' }}
+        continue-on-error: true
+        env:
+          DH_USER: ${{ env.DH_USER }}
+          DH_TOKEN: ${{ env.DH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+
+          user, pat, repo = os.environ['DH_USER'], os.environ['DH_TOKEN'], '115nas-docker'
+
+          def call(url, data=None, method=None, headers=None):
+              body = json.dumps(data).encode() if data is not None else None
+              hdrs = headers or {'Content-Type': 'application/json'}
+              req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
+              try:
+                  with urllib.request.urlopen(req, timeout=45) as r:
+                      return r.status, r.read().decode('utf-8', 'replace')
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode('utf-8', 'replace')
+
+          # PAT 可以当作密码登录，换取 JWT
+          st, body = call('https://hub.docker.com/v2/users/login',
+                          {'username': user, 'password': pat})
+          if st != 200:
+              print('login failed', st, body[:300])
+              raise SystemExit(1)
+          jwt = json.loads(body)['token']
+
+          full = open('README.md', encoding='utf-8').read()
+
+          summary = ('115 生活官方 Linux 客户端 Docker 版：浏览器打开即用（noVNC），'
+                     '内置中文输入法与 UTF-8 剪贴板，扫码登录态持久化。')
+          if len(summary) > 100:                      # Hub 简介上限 100 字符
+              summary = summary[:97] + '...'
+
+          st, body = call(
+              f'https://hub.docker.com/v2/repositories/{user}/{repo}/',
+              {'description': summary, 'full_description': full},
+              method='PATCH',
+              headers={'Authorization': 'JWT ' + jwt, 'Content-Type': 'application/json'})
+          print('PATCH status:', st)
+          print('summary:', summary)
+          print('full_description chars:', len(full))
+          if st >= 400:
+              print('response:', body[:500])
+              raise SystemExit(1)
+          print('Docker Hub 仓库概述已同步')
+          PY

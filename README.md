@@ -105,7 +105,7 @@ server {
     server_name example.com;
 
     location / {
-        proxy_pass http://192.168.3.96:6080;
+        proxy_pass http://192.168.1.10:6080;
         proxy_http_version 1.1;
 
         # 关键两行：少了就是「无法连接到服务器」
@@ -157,7 +157,7 @@ server {
 ```yaml
 ingress:
   - hostname: vnc2.example.com
-    service: http://192.168.3.96:6080      # 直接指容器，别经 NAS 上的 HTTP 反代
+    service: http://192.168.1.10:6080      # 直接指容器，别经 NAS 上的 HTTP 反代
     originRequest:
       http2Origin: false
   - service: http_status:404
@@ -179,7 +179,7 @@ WS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 
     -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==")
 
 # A. 直连容器
-curl -i -N --noproxy '*' "${WS[@]}" http://192.168.3.96:6080/websockify
+curl -i -N --noproxy '*' "${WS[@]}" http://192.168.1.10:6080/websockify
 
 # B. 走反代
 curl -i -N --noproxy '*' "${WS[@]}" http://example.com:6088/websockify
