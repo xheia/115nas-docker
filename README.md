@@ -35,19 +35,6 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
   115nas-docker:latest
 ```
 
-## 中文输入与剪贴板
-
-**容器内输入法**：在 noVNC 窗口里点输入框 → `Ctrl+Space` 呼出 fcitx5 → 打拼音、
-**数字键选字**（候选项直接显示在虚拟屏上）。
-
-**剪贴板**：容器用 TigerVNC 的 `Xtigervnc` 作显示栈，支持 RFB 的 Extended Clipboard
-扩展，剪贴板按 **UTF-8** 传输，**中文双向复制粘贴不再乱码**。
-
-> 老版本用 `x11vnc`，它不支持该扩展，只能退回标准 `ClientCutText`
-> （RFC 6143 §7.5.6，仅 ISO-8859-1），中文会被逐字截断到低 8 位而乱码。
-
-> 部分浏览器的异步剪贴板 API 仅在 HTTPS / localhost 下可用；若通过
-> `http://<IP>:6080` 访问时剪贴板不可用，改用 HTTPS（挂证书到 `/certs/server.pem`）。
 
 ## 目录与配置
 
