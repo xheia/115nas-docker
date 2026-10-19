@@ -171,7 +171,7 @@ server {
 
 ```yaml
 ingress:
-  - hostname: vnc2.xheic.com
+  - hostname: vnc2.abcdefg.com
     service: http://192.168.3.96:6080      # 直接指容器，别经 NAS 上的 HTTP 反代
     originRequest:
       http2Origin: false
