@@ -14,8 +14,8 @@ services:
     ports:
       - "6080:6080"     # noVNC 页面 + WebSocket（HTTP）
       - "6081:6081"     # HTTPS（仅挂载证书时监听）
-      # - "5900:5900"   # 只有用「原生 VNC 客户端直连」或「Cloudflare 浏览器渲染 VNC」
-      #                 # 时才需要：同时要开 VNC_BIND=0.0.0.0 + VNC_PASSWORD，否则容器拒启
+      # - "5900:5900"   # 只有用「原生 VNC 客户端直连」才需要：同时要开
+      #                 # VNC_BIND=0.0.0.0 + VNC_PASSWORD，否则容器拒启
     volumes:
       - ./data/config:/config       # 客户端配置与登录态（勿删）
       - ./data/appdata:/appdata     # WebKit Cookie = 扫码登录态（勿删）
