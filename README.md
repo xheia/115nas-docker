@@ -7,8 +7,6 @@
 - 一条 `docker compose up -d` 完成部署（首次构建约 5-15 分钟）
 - 浏览器打开 `http://<主机IP>:6080/` 即用，自动进入客户端
 - 扫码登录态持久化：重建容器不丢登录
-- 内置 fcitx5 拼音输入法：noVNC 窗口内 `Ctrl+Space` 直接打中文
-- NAS 共享目录挂进容器，下载直接落盘
 - 任意 Docker 主机可用：Linux / 群晖 DSM / QNAP / Windows
 
 ## 快速开始
