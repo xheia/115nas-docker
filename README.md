@@ -168,7 +168,7 @@ libmount 版本较新（util-linux ≥ 2.39）时第 2 步会失效：`mnt_table
 ## 镜像仓库与自动更新
 
 镜像发布在双仓库（均 public）：`ghcr.io/xheia/115nas-docker` 与 `xheia/115nas-docker`（Docker Hub），
-标签 `main` / `edge` / `latest` / `1.1.0`（1.1.0 内置 115Life 37.3.1）。
+标签 `main` / `edge` / `latest` / `1.1.1`（1.1.1 内置 115Life 37.3.1）。
 
 **115 官方客户端更新后，`latest` 自动跟进，无需人工干预：**
 
