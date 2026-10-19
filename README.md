@@ -98,6 +98,72 @@ docker run -d --name 115nas --restart unless-stopped --shm-size=1g \
 | `WS_PATH` | `websockify` | noVNC 的 WebSocket 端点。反代改写路径（加前缀）时改这里，如 `115nas/websockify` |
 | `WS_VERBOSE` | 空 | 设为任意值后 websockify 打印每个请求，用来确认反代有没有把 WS 握手转进来 |
 | `HTTPS_CERT` | `/certs/server.pem` | HTTPS 证书路径 |
+| `HIDE_SYSTEM_PATHS` | `1` | 文件选择器里收敛容器内部路径（见下节）。设 `0` 关闭 |
+| `GTK_BOOKMARKS` | `/root/Downloads=115 下载目录\|/media/nas=NAS 共享目录` | 钉在文件选择器侧栏顶部的书签，`\|` 分隔，写法 `路径=显示名` |
+| `EXTRA_VISIBLE_MOUNTS` | 空 | 额外允许出现在文件选择器卷列表里的挂载点，空格分隔，如 `/share/Download /share/Multimedia` |
+
+## 文件选择器里的路径（隐藏容器内部目录）
+
+选「上传哪个文件 / 下到哪个目录」时，115 客户端弹的是 **GTK3 原生文件选择器**，
+默认会把容器自己的文件系统整个摊在你面前：`/config`（登录态）、`/appdata`
+（WebKit Cookie）、`/cache`、`/logs` 这些卷，加上 `/bin` `/usr` 等镜像目录，
+全都和一两个 NAS 目录混在一起。
+
+容器启动时会自动做两步收敛，不用手动配置：
+
+1. **书签置顶** —— 把 `/root/Downloads`（客户端默认下载目录）和 `/media/nas`
+   （上传目录）钉在侧栏顶部，一次点击直达。
+   书签写在 `/config/gtk-3.0/bookmarks`，所有 GTK 文件选择器共用，随配置卷持久化。
+2. **精简卷列表** —— 「其他位置」里的 `/config` `/appdata` `/cache` `/logs`
+   `/etc/resolv.conf` 等条目来自 GIO 读的挂载表。容器会生成一份只保留
+   **根 + NAS 目录**的挂载表（`/tmp/115nas-mtab`），用 `LIBMOUNT_MTAB` 指给客户端进程。
+   实测典型容器从 16 条挂载收敛到 4 条：
+
+   ```
+   overlay / overlay rw,relatime,lowerdir=... 0 0
+   /dev/md9 /media/nas     ext4 rw,relatime 0 0
+   /dev/md9 /root/Downloads ext4 rw,relatime 0 0
+   /dev/md9 /share/Multimedia ext4 rw,relatime 0 0   ← EXTRA_VISIBLE_MOUNTS 加的
+   ```
+
+想让别的 NAS 共享目录也出现（比如 `/share/Multimedia` 挂进了容器）：
+
+```yaml
+environment:
+  - EXTRA_VISIBLE_MOUNTS=/share/Multimedia /share/Download
+  - GTK_BOOKMARKS=/root/Downloads=115 下载|/media/nas=NAS 共享|/share/Multimedia=影音
+```
+
+生效确认：
+
+```bash
+docker logs 115nas | grep "file chooser:"
+# 正常会看到：
+#   file chooser: 2 bookmark(s) pinned at /config/gtk-3.0/bookmarks
+#   file chooser: mount list trimmed 16 -> 4 entries (LIBMOUNT_MTAB=/tmp/115nas-mtab)
+```
+
+### 为什么不能「彻底」隐藏
+
+**原生 GTK3 没有「只显示指定目录」的开关。** `show-other-locations`、`show-trash`
+这些是 `gtk_places_sidebar_set_*()` 这类**应用侧 API**，不是 `settings.ini`
+或 gsettings 能改的配置项；只有 gtk3-classic 之类的第三方补丁集才把它做成
+可配置，为此引入非官方包不值得。
+
+所以现实效果是：
+
+- ✅ 侧栏顶部有 NAS 目录的书签，一点即达
+- ✅ 「其他位置」里不再出现 `/config` `/appdata` `/cache` `/logs` 等容器内部挂载
+- ⚠️ 但**容器根目录（`/`）仍然可达** —— 在路径栏里手动敲 `/` 回车，还是能看到
+  `/bin` `/usr` 这些镜像目录。要挡住这一层，得给容器加 `--cap-add SYS_ADMIN`
+  后用挂载命名空间把内部目录遮住，或者改用非 root 用户运行客户端
+  （`/config` 等属主是 root、权限 700，非 root 就进不去了）。这两条都会显著
+  增加部署复杂度，默认不做。
+
+libmount 版本较新（util-linux ≥ 2.39）时第 2 步会失效：`mnt_table_parse_mtab(NULL)`
+已硬编码读 `/proc/self/mountinfo`，`LIBMOUNT_MTAB` 被忽略。容器启动时会用
+`findmnt` 实测一次，不生效就**自动跳过**（日志里写 `LIBMOUNT_MTAB not honored`），
+只保留第 1 步的书签，不会有副作用。
 
 ## 镜像仓库与自动更新
 
@@ -267,6 +333,7 @@ HTTP 与 WS 一起透传，最省事。
 | 设了 `VNC_PASSWORD` 却不弹密码框 | 密码没生效。看 `docker logs 115nas`：应有 `password authentication enabled`；**没有就是容器在裸奔**。新版镜像在这种情形会直接拒绝启动（缺 `tigervnc-tools` 时就退化为无认证）。重建镜像并确认日志 |
 | 粘贴/复制中文乱码 | 看日志 `display:` 一行：应为 `tigervnc`；若显示 `x11vnc` 说明 TigerVNC 未装上，重构建镜像 |
 | 端口 6080 被占用 | 改 `HTTP_PORT` 并同步 compose 的 ports 映射 |
+| 文件选择器里还是一堆 `config` `appdata` `cache` | 看 `docker logs 115nas \| grep "file chooser:"`。出现 `LIBMOUNT_MTAB not honored` = 基础镜像的 libmount ≥ 2.39，卷列表精简不生效（书签仍然生效）；出现 `skip bookmark ... (not mounted)` = 对应目录没挂进去，检查 `NAS_SHARE`。想完全关闭收敛：`HIDE_SYSTEM_PATHS=0` |
 
 ## 已知限制
 
@@ -274,6 +341,8 @@ HTTP 与 WS 一起透传，最省事。
 - 官方客户端仅 amd64/x86_64，ARM 主机无法运行（deb 依赖决定）
 - 单容器单 115 账号（多开：复制一份 compose，改容器名与端口）
 - noVNC 不传输本机输入法——中文靠容器内 fcitx5 或粘贴
+- 文件选择器无法彻底隐藏容器根目录 `/`（标准 GTK3 无此开关，见
+  [文件选择器里的路径](#文件选择器里的路径隐藏容器内部目录)）
 
 ## 版权与许可
 

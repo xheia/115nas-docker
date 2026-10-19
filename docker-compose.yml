@@ -29,3 +29,8 @@ services:
       # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端/CF 浏览器渲染 VNC 需要；必须同时设密码
       # - SCREEN_WIDTH=1600           # 虚拟屏分辨率（浏览器端自动缩放）
       # - SCREEN_HEIGHT=900
+      # --- 文件选择器（上传/选择下载目录时弹的那个窗口）可见路径 ---
+      # - HIDE_SYSTEM_PATHS=0         # 关掉路径收敛，恢复显示容器所有目录
+      # - GTK_BOOKMARKS=/root/Downloads=115 下载目录|/media/nas=NAS 共享目录
+      #                               # 钉在侧栏顶部的书签，| 分隔，路径=显示名
+      # - EXTRA_VISIBLE_MOUNTS=/share/Download   # 额外允许显示的挂载点，空格分隔

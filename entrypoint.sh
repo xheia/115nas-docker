@@ -17,6 +17,11 @@
 #   WS_PATH                    可选；反代改写路径时指定 noVNC 的 WebSocket 端点
 #                              （如 115nas/websockify），默认 websockify
 #   WS_VERBOSE                 可选；非空则 websockify 打印每个请求（排查反代用）
+#   HIDE_SYSTEM_PATHS          默认 1：文件选择器里隐藏容器内部路径（见第 6.5 节）
+#   GTK_BOOKMARKS              默认 "/root/Downloads=115 下载目录|/media/nas=NAS 共享目录"
+#                              钉在文件选择器侧栏顶部的书签，| 分隔，路径=显示名
+#   EXTRA_VISIBLE_MOUNTS       默认空；额外允许出现在文件选择器卷列表里的挂载点，
+#                              空格分隔（如 "/share/Download /share/Multimedia"）
 #
 # 日志统一写 /logs/（建议挂卷持久化）：
 #   entrypoint.log / xvnc.log / openbox.log / fcitx5.log / x11vnc.log /
@@ -452,6 +457,110 @@ PYEOF
 }
 gen_index
 log "entry page generated at $NOVNC_WEB/index.html (probes WebSocket before entering)"
+
+# ------------------------------------------- 6.5 收敛 GTK 文件选择器的可见路径
+# 115 客户端选「上传哪个文件 / 下到哪个目录」时弹的是 GTK3 原生文件选择器，
+# 它会把容器自己的文件系统整个摊开：/config（登录态）、/appdata（WebKit
+# Cookie）、/cache、/logs 这些卷，和 /bin /usr 等镜像目录，跟 NAS 目录混在一起。
+#
+# 标准 GTK3 **没有**「只显示指定目录」的开关：PlacesSidebar 的
+# show-other-locations / show-trash 全部是应用侧 API（gtk_places_sidebar_set_*），
+# 不是 settings.ini / gsettings 能改的；做成配置项的是 gtk3-classic 这类第三方
+# 补丁集，引入非官方包不值得。所以这里做两件确实能落地的事：
+#
+#   ① 书签置顶：写 $XDG_CONFIG_HOME/gtk-3.0/bookmarks。GTK 的所有 file chooser
+#      （含 Avalonia/.NET 等在 Linux 上复用 GTK 原生对话框的应用）共享这一个
+#      文件，写进去的目录固定排在侧栏顶部，一次点击直达，不用再去翻卷列表。
+#      默认钉住 /root/Downloads（客户端默认下载目录）与 /media/nas（上传目录）。
+#
+#   ② 精简卷列表：「其他位置」里那些 /config /appdata /cache /logs 条目来自
+#      GVolumeMonitor → GIO 的 g_unix_mounts_get() → libmount 读挂载表。libmount
+#      允许用 LIBMOUNT_MTAB 指定一份自定义挂载表（mnt_get_mtab_path() 读该变量），
+#      于是这里生成一份只保留「根 + NAS 目录」的精简表给客户端进程用，容器内部
+#      卷就不再作为独立卷出现。
+#      注意 libmount ≥ 2.39 已废弃这条路径（mnt_table_parse_mtab(NULL) 直接
+#      硬编码 /proc/self/mountinfo，mnt_has_regular_mtab() 退化成返回 0 的桩），
+#      所以启用前先用 findmnt 实测一次，不生效就整段跳过，不留后遗症。
+#
+# 兜底开关：HIDE_SYSTEM_PATHS=0 全部关掉。
+setup_file_chooser() {
+    if [ "${HIDE_SYSTEM_PATHS:-1}" = "0" ]; then
+        log "file chooser: HIDE_SYSTEM_PATHS=0, container paths left as-is"
+        return
+    fi
+
+    # ---- ① 书签置顶 -------------------------------------------------------
+    # XDG_CONFIG_HOME=/config，所以书签落在 /config/gtk-3.0/bookmarks（随配置卷持久）。
+    local bmdir="${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/gtk-3.0"
+    mkdir -p "$bmdir" 2>/dev/null || { log "file chooser: WARN cannot create $bmdir"; return; }
+
+    local bm="$bmdir/bookmarks"
+    local items item path label n=0
+    # 条目用 | 分隔：路径里可能带空格/冒号，用 | 作分隔符歧义最小
+    IFS='|' read -r -a items <<< "${GTK_BOOKMARKS:-/root/Downloads=115 下载目录|/media/nas=NAS 共享目录}"
+    : > "$bm"
+    for item in "${items[@]}"; do
+        [ -n "$item" ] || continue
+        path="${item%%=*}"
+        label="${item#*=}"
+        [ -n "$path" ] || continue
+        if [ ! -d "$path" ]; then
+            log "file chooser: skip bookmark $path (not mounted)"
+            continue
+        fi
+        # file:// URI 中的空格必须转义成 %20；空格之后是显示名
+        printf 'file://%s %s\n' "$(printf '%s' "$path" | sed 's/ /%20/g')" "$label" >> "$bm"
+        n=$((n + 1))
+    done
+    if [ "$n" -gt 0 ]; then
+        log "file chooser: $n bookmark(s) pinned at $bm"
+    else
+        log "file chooser: WARN no bookmark directory exists (check NAS_SHARE mounts)"
+    fi
+
+    # ---- ② 精简挂载表 -----------------------------------------------------
+    # /proc/self/mounts 里路径中的空格已转义成 \040，直接按空格切词是安全的。
+    MTAB_FILTER_FILE=/tmp/115nas-mtab
+    : > "$MTAB_FILTER_FILE"
+    while read -r dev mnt fstype opts _rest; do
+        [ -n "${mnt:-}" ] || continue
+        case "$mnt" in
+            /)                 ;;   # 根总保留，否则一堆路径判断会拿不到挂载信息
+            /root/Downloads)   ;;   # 客户端默认下载目录
+            /media/*)          ;;   # 上传目录 /media/nas 及其它 /media 挂载
+            *)
+                # 用户额外指定的挂载点（EXTRA_VISIBLE_MOUNTS="/share/A /share/B"）
+                case " ${EXTRA_VISIBLE_MOUNTS:-} " in
+                    *" $mnt "*) ;;
+                    *) continue ;;
+                esac
+                ;;
+        esac
+        printf '%s %s %s %s 0 0\n' "$dev" "$mnt" "$fstype" "$opts" >> "$MTAB_FILTER_FILE"
+    done < /proc/self/mounts
+
+    local want all got
+    want=$(grep -c . "$MTAB_FILTER_FILE" 2>/dev/null)
+    if [ "${want:-0}" -eq 0 ] || ! command -v findmnt >/dev/null 2>&1; then
+        rm -f "$MTAB_FILTER_FILE"
+        log "file chooser: mount trimming skipped (no findmnt or nothing to keep)"
+        return
+    fi
+
+    # 关键：先实测 libmount 认不认 LIBMOUNT_MTAB。不认就撤回，绝不带着一份
+    # 假挂载表启动客户端——那会让 GIO 认为系统里几乎没有挂载点。
+    all=$(findmnt -rno TARGET 2>/dev/null | grep -c .)
+    got=$(LIBMOUNT_MTAB="$MTAB_FILTER_FILE" findmnt -rno TARGET 2>/dev/null | grep -c .)
+    if [ "${got:-0}" -eq "$want" ] && [ "${got:-0}" -lt "${all:-0}" ]; then
+        export LIBMOUNT_MTAB="$MTAB_FILTER_FILE"
+        log "file chooser: mount list trimmed $all -> $got entries (LIBMOUNT_MTAB=$MTAB_FILTER_FILE)"
+    else
+        rm -f "$MTAB_FILTER_FILE"
+        log "file chooser: LIBMOUNT_MTAB not honored by this libmount (needs util-linux < 2.39); keeping full mount list"
+    fi
+}
+MTAB_FILTER_FILE=""
+setup_file_chooser
 
 # ---------------------------------------------------------------- 7. Life115
 # 崩溃退出时记录并重启，保持容器可用（日志在 /logs/life115.log）。
