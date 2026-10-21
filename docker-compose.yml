@@ -7,6 +7,10 @@ services:
     container_name: 115nas
     hostname: 115nas
     restart: unless-stopped
+    # 停止容器时给客户端留出退出的时间（默认只给 10 秒）。它要把上传/下载任务
+    # 状态写回本地库，来不及写就会被 SIGKILL，重启后上传列表里已完成的任务会
+    # 重新冒出来。
+    stop_grace_period: 20s
     shm_size: 1g
     ports:
       - "6080:6080"     # noVNC 页面 + WebSocket（HTTP）

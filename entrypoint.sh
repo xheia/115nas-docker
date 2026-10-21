@@ -28,6 +28,9 @@
 #   HIDE_SYSTEM_PATHS          默认 1：文件选择器侧栏钉上常用目录书签（第 6.5 节）
 #   GTK_BOOKMARKS              默认 "/root/Downloads=115 下载目录|/media/nas=NAS 共享目录"
 #                              钉在文件选择器侧栏顶部的书签，| 分隔，路径=显示名
+#   LIFE_STOP_TIMEOUT          停止容器时等客户端自己退出的秒数（默认 8）。
+#                              客户端要把传输队列与任务状态写回本地库；直接 SIGKILL
+#                              会让库停在旧快照，重启后上传列表里已完成的任务又冒出来。
 #
 # 日志统一写 /logs/（建议挂卷持久化）：
 #   entrypoint.log / xvnc.log / openbox.log / fcitx5.log / x11vnc.log /
@@ -58,6 +61,10 @@ VNC_PASSWORD=${VNC_PASSWORD:-}
 VNC_FRAME_RATE=${VNC_FRAME_RATE:-25}
 NOVNC_QUALITY=${NOVNC_QUALITY:-5}
 NOVNC_COMPRESSION=${NOVNC_COMPRESSION:-1}
+# 停止容器时留给客户端自己退出的时间。它要把传输队列写回本地库，
+# 硬杀之后重启，上传列表会从库里的旧快照恢复（已完成的任务又冒出来）。
+LIFE_STOP_TIMEOUT=${LIFE_STOP_TIMEOUT:-8}
+LIFE_PID_FILE=/tmp/115nas-life115.pid
 HTTPS_CERT=${HTTPS_CERT:-/certs/server.pem}
 NOVNC_WEB=/usr/share/novnc
 VNC_PASS_FILE=/tmp/115nas-vnc.pass
@@ -65,9 +72,54 @@ XVNC_PID=""
 
 XVFB_PID=""; OB_PID=""; VNC_PID=""; WS_PID=""; WSS_PID=""; LIFE_PID=""
 
+# kill -0 对**僵尸进程**同样返回成功（进程已经退出、只是还没被 reap），而容器的
+# PID 1 就是这个脚本、不会去 reap 孤儿，所以直接拿 kill -0 判活会永远得到「还活着」，
+# 每次停止都白等满 LIFE_STOP_TIMEOUT。必须看 /proc/<pid>/stat 的状态位。
+life_alive() {
+    local p="${1:-}" st=""
+    [ -n "$p" ] || return 1
+    kill -0 "$p" 2>/dev/null || return 1
+    if [ -r "/proc/$p/stat" ]; then
+        st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
+        [ "$st" != "Z" ] || return 1
+    fi
+    return 0
+}
+
 cleanup() {
     log "entrypoint: received stop signal, shutting down..."
-    for P in "$LIFE_PID" "$WSS_PID" "$WS_PID" "$VNC_PID" "$XVNC_PID" "$OB_PID" "$XVFB_PID"; do
+
+    # ① 先掐掉重启循环。否则下面把客户端停掉，循环会立刻把它重新拉起来。
+    #    TERM 之后还得 KILL：bash 在等前台子进程时会把信号压到子进程结束才处理，
+    #    而它等的正是 Life115——那就成了死等。
+    if [ -n "$LIFE_PID" ] && kill -0 "$LIFE_PID" 2>/dev/null; then
+        kill -TERM "$LIFE_PID" 2>/dev/null
+        sleep 1
+        kill -KILL "$LIFE_PID" 2>/dev/null
+    fi
+
+    # ② 让 Life115 自己退出，而不是被 SIGKILL 拔电源。它退出时会把传输队列和
+    #    任务状态写回 /appdata 里的本地库；不写回去，下次启动只能从旧快照恢复，
+    #    表现就是上传列表里已完成的任务又冒出来、或者任务停在中间态。
+    local lp="" i=0
+    [ -f "$LIFE_PID_FILE" ] && lp=$(cat "$LIFE_PID_FILE" 2>/dev/null || true)
+    if life_alive "$lp"; then
+        log "entrypoint: asking Life115 (pid $lp) to exit, waiting up to ${LIFE_STOP_TIMEOUT}s"
+        kill -TERM "$lp" 2>/dev/null
+        while [ "$i" -lt "$LIFE_STOP_TIMEOUT" ] && life_alive "$lp"; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if life_alive "$lp"; then
+            log "entrypoint: WARNING Life115 still alive after ${LIFE_STOP_TIMEOUT}s, killing it (transfer state may not be flushed)"
+            kill -KILL "$lp" 2>/dev/null
+        else
+            log "entrypoint: Life115 exited cleanly after ${i}s (transfer state flushed)"
+        fi
+    fi
+
+    # ③ 其余进程没有状态要落盘，直接 TERM
+    for P in "$WSS_PID" "$WS_PID" "$VNC_PID" "$XVNC_PID" "$OB_PID" "$XVFB_PID"; do
         [ -n "$P" ] && kill "$P" 2>/dev/null
     done
     # VNC 密码临时文件
@@ -617,10 +669,16 @@ setup_file_chooser
 
 # ---------------------------------------------------------------- 7. Life115
 # 崩溃退出时记录并重启，保持容器可用（日志在 /logs/life115.log）。
+# 真实 PID 写到 $LIFE_PID_FILE：$LIFE_PID 是外层重启循环的 PID，不是客户端本身，
+# 停止容器时要停的是客户端（它才有状态要落盘），杀循环只会留下孤儿进程。
 log "starting Life115 (/opt/115life/Life115)"
+rm -f "$LIFE_PID_FILE"
 (
     while true; do
-        /opt/115life/Life115 >>"$LOG_DIR/life115.log" 2>&1
+        /opt/115life/Life115 >>"$LOG_DIR/life115.log" 2>&1 &
+        CHILD=$!
+        echo "$CHILD" > "$LIFE_PID_FILE"
+        wait "$CHILD"
         RC=$?
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Life115 exited rc=$RC, restart in 3s" >> "$LOG_DIR/life115.log"
         sleep 3

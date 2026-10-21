@@ -27,6 +27,7 @@ services:
     container_name: 115nas
     hostname: 115nas
     restart: unless-stopped
+    stop_grace_period: 20s
     shm_size: 1g
     ports:
       - "6080:6080"     # noVNC 页面 + WebSocket（HTTP）
@@ -106,6 +107,7 @@ noVNC / websockify 本身**没有账号体系**，谁打开页面谁就能操作
 | 下载的文件不在 NAS 上            | 客户端设置里下载目录指回 `/root/Downloads`；检查 `NAS_SHARE` 挂载                                                                                                       |
 | 设了 `VNC_PASSWORD` 却不弹密码框 | 密码没生效。`docker logs 115nas` 里应有 `password authentication enabled`；**没有就是容器在裸奔**（这种情况新版镜像会直接拒绝启动），重建镜像并确认日志                                              |
 | 115 提示登录异常 / 异地登录        | 容器重建后主机标识变了，会被当成新设备。compose 已固定 `hostname`、镜像把 machine-id 存进 `/config`；再查出口 IP 是否走了代理：`docker exec 115nas curl -s --noproxy '*' https://myip.ipip.net` |
+| 重启后上传列表里又冒出已完成的任务   | 客户端把传输记录存在 `/appdata` 的本地库里，重启不清空（桌面版也一样）。若是**重复条目或状态错乱**，说明停止容器时客户端被强杀、队列没落盘：新版镜像会等它自己退出，`docker logs 115nas` 里能看到 `Life115 exited cleanly after Ns`。要清空就在客户端里删传输记录 |
 | 端口 6080 被占用              | 改 `HTTP_PORT` 并同步 compose 的 ports                                                                                                                      |
 
 ## 已知限制
