@@ -70,9 +70,8 @@ services:
 | `VNC_BIND`                                        | `127.0.0.1`                                     | 设 `0.0.0.0` 才对外开放 5900（原生 VNC 客户端直连用）——**必须同时设密码，否则容器拒绝启动**                                                         |
 | `WS_PATH`                                         | `websockify`                                    | 被套了路径前缀（如 `/115nas/`）时改成 `115nas/websockify`                                                                        |
 | `HTTPS_CERT`                                      | `/certs/server.pem`                             | HTTPS 证书路径                                                                                                          |
-| `HIDE_SYSTEM_PATHS`                               | `1`                                             | 文件选择器里收敛容器内部路径，设 `0` 关闭                                                                                             |
+| `HIDE_SYSTEM_PATHS`                               | `1`                                             | 文件选择器侧栏钉上常用目录书签，设 `0` 关闭                                                                                        |
 | `GTK_BOOKMARKS`                                   | `/root/Downloads=115 下载目录\|/media/nas=NAS 共享目录` | 文件选择器侧栏书签，`\|` 分隔，写法 `路径=显示名`                                                                                       |
-| `EXTRA_VISIBLE_MOUNTS`                            | 空                                               | 额外允许出现在卷列表里的挂载点，空格分隔                                                                                                |
 
 ## 性能
 
@@ -114,6 +113,8 @@ noVNC / websockify 本身**没有账号体系**，谁打开页面谁就能操作
 - 视频播放为软件解码（无 GPU 直通），高码率片源可能卡顿
 - 官方客户端仅 amd64/x86_64，ARM 主机无法运行（deb 依赖决定）
 - 单容器单 115 账号（多开：复制一份 compose，改容器名、hostname 与端口）
+- 文件选择器里仍能看到容器自己的目录（`/config`、`/appdata` 等），只是常用目录被钉在
+  侧栏顶部。标准 GTK3 没有「只显示指定目录」的开关，收干净要动挂载命名空间，不值得
 
 ## 版权与许可
 

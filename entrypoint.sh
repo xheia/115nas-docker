@@ -25,11 +25,9 @@
 #   WS_PATH                    可选；反代改写路径时指定 noVNC 的 WebSocket 端点
 #                              （如 115nas/websockify），默认 websockify
 #   WS_VERBOSE                 可选；非空则 websockify 打印每个请求（排查反代用）
-#   HIDE_SYSTEM_PATHS          默认 1：文件选择器里隐藏容器内部路径（见第 6.5 节）
+#   HIDE_SYSTEM_PATHS          默认 1：文件选择器侧栏钉上常用目录书签（第 6.5 节）
 #   GTK_BOOKMARKS              默认 "/root/Downloads=115 下载目录|/media/nas=NAS 共享目录"
 #                              钉在文件选择器侧栏顶部的书签，| 分隔，路径=显示名
-#   EXTRA_VISIBLE_MOUNTS       默认空；额外允许出现在文件选择器卷列表里的挂载点，
-#                              空格分隔（如 "/share/Download /share/Multimedia"）
 #
 # 日志统一写 /logs/（建议挂卷持久化）：
 #   entrypoint.log / xvnc.log / openbox.log / fcitx5.log / x11vnc.log /
@@ -168,6 +166,7 @@ if [ "$VNC_BIND" != "127.0.0.1" ]; then
 fi
 
 VNC_MODE=""
+FPS_EFFECTIVE=60   # Xtigervnc 的默认值；探测成功才改成 VNC_FRAME_RATE
 
 wait_vnc_port() {
     local i
@@ -180,13 +179,23 @@ wait_vnc_port() {
 
 start_tigervnc() {
     local sec="None" pw=""
-    # 帧率上限：Xvnc 每发一帧都要在本机 CPU 上做 Tight/JPEG 编码。Xtigervnc
-    # 默认 -FrameRate=60，对文件管理界面是纯浪费。老版本没有这个参数，先探测；
-    # 加 timeout 是防它在 -help 上挂住卡住整个启动。
+    # 帧率上限：Xvnc 每发一帧都要在本机 CPU 上做 Tight/JPEG 编码，而它默认
+    # -FrameRate=60，对文件管理界面是纯浪费。
+    #
+    # 探测方式：**不要用 `Xtigervnc -help`**。-FrameRate 属于 TigerVNC 的
+    # "parameter" 段（和 -geometry / -depth 这类 core option 不同），-help 打印的
+    # 是 X server 的核心用法，不含参数段——实测 Debian 12 / TigerVNC 1.12 上
+    # grep -help 是空手而归，但参数明明是支持的（man Xvnc 有），于是白白退化成
+    # 60fps 还打一条误导性的 WARNING。改成在二进制里找选项字符串，这才是
+    # Xvnc 参数表的真实内容。
     local fps_flag=""
-    if [ "${VNC_FRAME_RATE}" != "0" ] \
-       && timeout 5 Xtigervnc -help 2>&1 | grep -q -- "-FrameRate"; then
-        fps_flag="-FrameRate ${VNC_FRAME_RATE}"
+    if [ "${VNC_FRAME_RATE}" != "0" ]; then
+        local xt_bin
+        xt_bin=$(command -v Xtigervnc 2>/dev/null || true)
+        if [ -n "$xt_bin" ] && grep -qa -- "-FrameRate" "$xt_bin" 2>/dev/null; then
+            fps_flag="-FrameRate ${VNC_FRAME_RATE}"
+            FPS_EFFECTIVE=$VNC_FRAME_RATE
+        fi
     fi
     if [ -n "$VNC_PASSWORD" ]; then
         rm -f "$VNC_PASS_FILE"
@@ -224,7 +233,8 @@ start_tigervnc() {
         if [ -n "$fps_flag" ]; then
             log "  frame rate capped at ${VNC_FRAME_RATE}fps (was 60 by default)"
         else
-            log "  WARNING: -FrameRate unsupported by this Xtigervnc, running at the default 60fps"
+            log "  WARNING: this Xtigervnc has no -FrameRate; running at the default 60fps"
+            log "           (set VNC_FRAME_RATE=0 to silence, or rebuild on a newer tigervnc)"
         fi
         return 0
     fi
@@ -263,6 +273,7 @@ start_x11vnc() {
     VNC_PID=$!
     if wait_vnc_port; then
         VNC_MODE="x11vnc"
+        FPS_EFFECTIVE=0   # x11vnc 没有 -FrameRate，别在收尾日志里冒充已限帧
         log "x11vnc listening on $VNC_BIND:$VNC_PORT (pid $VNC_PID)"
         return 0
     fi
@@ -549,23 +560,24 @@ log "entry page generated at $NOVNC_WEB/index.html (probes WebSocket before ente
 # 标准 GTK3 **没有**「只显示指定目录」的开关：PlacesSidebar 的
 # show-other-locations / show-trash 全部是应用侧 API（gtk_places_sidebar_set_*），
 # 不是 settings.ini / gsettings 能改的；做成配置项的是 gtk3-classic 这类第三方
-# 补丁集，引入非官方包不值得。所以这里做两件确实能落地的事：
+# 补丁集，引入非官方包不值得。
 #
-#   ① 书签置顶：写 $XDG_CONFIG_HOME/gtk-3.0/bookmarks。GTK 的所有 file chooser
-#      （含 Avalonia/.NET 等在 Linux 上复用 GTK 原生对话框的应用）共享这一个
-#      文件，写进去的目录固定排在侧栏顶部，一次点击直达，不用再去翻卷列表。
-#      默认钉住 /root/Downloads（客户端默认下载目录）与 /media/nas（上传目录）。
+# 所以这里只做**书签置顶**：写 $XDG_CONFIG_HOME/gtk-3.0/bookmarks。GTK 的所有
+# file chooser（含 Avalonia/.NET 等在 Linux 上复用 GTK 原生对话框的应用）共享这
+# 一个文件，写进去的目录固定排在侧栏顶部，一次点击直达，不用再翻卷列表。
+# 默认钉住 /root/Downloads（客户端默认下载目录）与 /media/nas（上传目录）。
 #
-#   ② 精简卷列表：「其他位置」里那些 /config /appdata /cache /logs 条目来自
-#      GVolumeMonitor → GIO 的 g_unix_mounts_get() → libmount 读挂载表。libmount
-#      允许用 LIBMOUNT_MTAB 指定一份自定义挂载表（mnt_get_mtab_path() 读该变量），
-#      于是这里生成一份只保留「根 + NAS 目录」的精简表给客户端进程用，容器内部
-#      卷就不再作为独立卷出现。
-#      注意 libmount ≥ 2.39 已废弃这条路径（mnt_table_parse_mtab(NULL) 直接
-#      硬编码 /proc/self/mountinfo，mnt_has_regular_mtab() 退化成返回 0 的桩），
-#      所以启用前先用 findmnt 实测一次，不生效就整段跳过，不留后遗症。
+# 【别再试「精简卷列表」】曾经用 LIBMOUNT_MTAB 喂一份只含 NAS 目录的挂载表，
+# 在 Debian 上不可能生效，根因（2026-10-21 读源码确认）：
+#   链路是 GVolumeMonitor → g_unix_mounts_get() → libmount。libmount 确实有
+#   mnt_get_mtab_path() 读 $LIBMOUNT_MTAB，但 __mnt_table_parse_mtab() 只在
+#   **编译了 USE_LIBMOUNT_SUPPORT_MTAB** 时才调 mnt_has_regular_mtab() 去取那个
+#   路径；否则 filename 直接置 NULL，硬编码读 /proc/self/mountinfo。
+#   Debian/Ubuntu 的 util-linux 都没开这个宏，所以那个环境变量读都不会被读到。
+#   要真的收干净只有两条路：mount namespace 遮蔽（要 CAP_SYS_ADMIN），或让客户端
+#   以非 root 跑（/config 等 700 就进不去）。成本远超收益，没做。
 #
-# 兜底开关：HIDE_SYSTEM_PATHS=0 全部关掉。
+# 兜底开关：HIDE_SYSTEM_PATHS=0 关掉书签。
 setup_file_chooser() {
     if [ "${HIDE_SYSTEM_PATHS:-1}" = "0" ]; then
         log "file chooser: HIDE_SYSTEM_PATHS=0, container paths left as-is"
@@ -600,49 +612,7 @@ setup_file_chooser() {
     else
         log "file chooser: WARN no bookmark directory exists (check NAS_SHARE mounts)"
     fi
-
-    # ---- ② 精简挂载表 -----------------------------------------------------
-    # /proc/self/mounts 里路径中的空格已转义成 \040，直接按空格切词是安全的。
-    MTAB_FILTER_FILE=/tmp/115nas-mtab
-    : > "$MTAB_FILTER_FILE"
-    while read -r dev mnt fstype opts _rest; do
-        [ -n "${mnt:-}" ] || continue
-        case "$mnt" in
-            /)                 ;;   # 根总保留，否则一堆路径判断会拿不到挂载信息
-            /root/Downloads)   ;;   # 客户端默认下载目录
-            /media/*)          ;;   # 上传目录 /media/nas 及其它 /media 挂载
-            *)
-                # 用户额外指定的挂载点（EXTRA_VISIBLE_MOUNTS="/share/A /share/B"）
-                case " ${EXTRA_VISIBLE_MOUNTS:-} " in
-                    *" $mnt "*) ;;
-                    *) continue ;;
-                esac
-                ;;
-        esac
-        printf '%s %s %s %s 0 0\n' "$dev" "$mnt" "$fstype" "$opts" >> "$MTAB_FILTER_FILE"
-    done < /proc/self/mounts
-
-    local want all got
-    want=$(grep -c . "$MTAB_FILTER_FILE" 2>/dev/null)
-    if [ "${want:-0}" -eq 0 ] || ! command -v findmnt >/dev/null 2>&1; then
-        rm -f "$MTAB_FILTER_FILE"
-        log "file chooser: mount trimming skipped (no findmnt or nothing to keep)"
-        return
-    fi
-
-    # 关键：先实测 libmount 认不认 LIBMOUNT_MTAB。不认就撤回，绝不带着一份
-    # 假挂载表启动客户端——那会让 GIO 认为系统里几乎没有挂载点。
-    all=$(findmnt -rno TARGET 2>/dev/null | grep -c .)
-    got=$(LIBMOUNT_MTAB="$MTAB_FILTER_FILE" findmnt -rno TARGET 2>/dev/null | grep -c .)
-    if [ "${got:-0}" -eq "$want" ] && [ "${got:-0}" -lt "${all:-0}" ]; then
-        export LIBMOUNT_MTAB="$MTAB_FILTER_FILE"
-        log "file chooser: mount list trimmed $all -> $got entries (LIBMOUNT_MTAB=$MTAB_FILTER_FILE)"
-    else
-        rm -f "$MTAB_FILTER_FILE"
-        log "file chooser: LIBMOUNT_MTAB not honored by this libmount (needs util-linux < 2.39); keeping full mount list"
-    fi
 }
-MTAB_FILTER_FILE=""
 setup_file_chooser
 
 # ---------------------------------------------------------------- 7. Life115
@@ -662,7 +632,7 @@ log "115nas container is up"
 log "  noVNC page : http://<host>:$HTTP_PORT/   (https://<host>:$HTTPS_PORT/)"
 log "  VNC target : $VNC_BIND:$VNC_PORT (raw RFB; for native VNC clients only)"
 log "  display    : $VNC_MODE (tigervnc = UTF-8 clipboard; x11vnc = Latin-1, CJK garbles)"
-log "  perf       : frame rate ${VNC_FRAME_RATE}fps, noVNC quality ${NOVNC_QUALITY}, compression ${NOVNC_COMPRESSION}"
+log "  perf       : frame rate ${FPS_EFFECTIVE:-0}fps, noVNC quality ${NOVNC_QUALITY}, compression ${NOVNC_COMPRESSION}"
 
 # ---------------------------------------------------------------- 8. 常驻
 # sleep+wait 组合让 trap 能立即响应停止信号。
