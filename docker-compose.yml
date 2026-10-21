@@ -1,14 +1,11 @@
 # 115nas — 115 生活客户端 Docker 版
 services:
   115nas:
-    # 默认直接用发布版镜像（ghcr.io）。latest 由 CI 自动维护：
-    # 每天检查 115 官方 Linux 客户端版本，有新版本就重建并更新 latest，
-    # 所以 docker compose pull && docker compose up -d 即可跟随官方更新。
-    # - 想锁定版本：把 :latest 改成具体 tag（如 :1.1.1，对应 115Life 37.3.1）
-    # - 想本地构建：取消下面 build: . 的注释，并把 image 改回 115nas-docker:1.1.1
-    #build: .   #本地构建镜像
+    # 默认用发布版镜像（ghcr.io）。想锁定版本就把 :latest 换成具体 tag
+    # （如 :1.1.2，对应 115Life 37.3.1）；想本地构建就取消 build: . 的注释。
     image: ghcr.io/xheia/115nas-docker:latest
     container_name: 115nas
+    hostname: 115nas
     restart: unless-stopped
     shm_size: 1g
     ports:
@@ -26,7 +23,11 @@ services:
     environment:
       - TZ=Asia/Shanghai
       # - VNC_PASSWORD=yourpassword   # 暴露到公网时务必设置
-      # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端/CF 浏览器渲染 VNC 需要；必须同时设密码
+      # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端直连需要；必须同时设密码
+      # --- 性能（默认值已调过，一般不用动）---
+      # - VNC_FRAME_RATE=25           # 帧率上限，0 = 不限（默认 25；Xtigervnc 原生默认 60）
+      # - NOVNC_QUALITY=5             # JPEG 画质 0-9（默认 5）
+      # - NOVNC_COMPRESSION=1         # 压缩级别 0-9（默认 1，level 1 最省 CPU）
       # - SCREEN_WIDTH=1600           # 虚拟屏分辨率（浏览器端自动缩放）
       # - SCREEN_HEIGHT=900
       # --- 文件选择器（上传/选择下载目录时弹的那个窗口）可见路径 ---

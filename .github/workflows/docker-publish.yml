@@ -1,7 +1,7 @@
 name: Publish Docker image
 
 # 触发方式：
-#   1) 定时（每天 18:00 北京时间）：检查 115 官方 Linux 客户端是否有新版本，
+#   1) 定时（每周三 18:00 北京时间）：检查 115 官方 Linux 客户端是否有新版本，
 #      有则自动下载新 deb、更新 Dockerfile 并提交，然后重建发布 latest。
 #   2) 打版本标签推送：git tag v1.1.0 && git push origin v1.1.0
 #   3. GitHub 仓库页面手动：Actions → Publish Docker image → Run workflow
@@ -29,7 +29,7 @@ on:
   push:
     tags: ["v*"]
   schedule:
-    - cron: "0 10 * * *"   # 每天 18:00（UTC+8）
+    - cron: "0 10 * * 3"   # 每周三 18:00（UTC+8，周三 = 3）
   workflow_dispatch:
 
 env:

@@ -77,12 +77,25 @@ RUN apt-get update \
       tigervnc-standalone-server tigervnc-tools xvfb x11vnc \
       fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 \
       libgtk-3-0 libwebkit2gtk-4.1-0 libsecret-1-0 libnotify4 \
-      libva2 libva-drm2 libfontconfig1 libssl3 \
+      libva2 libva-drm2 fontconfig libfontconfig1 libssl3 \
       desktop-file-utils xdg-utils shared-mime-info \
       fonts-noto-cjk \
       libgl1 libegl1 libgles2 libglx0 libglvnd0 libasound2 \
       libxkbcommon0 libxcursor1 libxrandr2 libxi6 libxinerama1 \
  && rm -rf /var/lib/apt/lists/*
+
+# 字体缓存预热：Noto CJK 是十个字体文件、约 200MB，fc-cache 冷扫描在 NAS 这类
+# CPU 上要好几秒，表现为「窗口出来了但文字迟到」。而 $XDG_CACHE_HOME=/cache
+# 是运行时挂卷、首次启动为空，缓存放不到那里去。所以构建时先算好一份存在
+# /opt/fontconfig-cache，由 entrypoint 在首次启动时复制到卷里。
+#
+# 注意必须显式指定 XDG_CACHE_HOME：上面的 ENV 已把它设成 /cache，fontconfig
+# 会照着这个变量写缓存，不覆盖的话缓存会落在 /cache 而这个目录运行时被卷盖掉。
+# 全过程容错：fc-cache 失败也不该让构建挂掉，entrypoint 里同样会跳过。
+RUN mkdir -p /tmp/fccache; \
+    XDG_CACHE_HOME=/tmp/fccache fc-cache -f >/dev/null 2>&1; \
+    [ -d /tmp/fccache/fontconfig ] && cp -a /tmp/fccache/fontconfig /opt/fontconfig-cache; \
+    rm -rf /tmp/fccache
 
 # ---- 官方 115 生活客户端（deb 随仓库分发，构建时 COPY 进来）-----------------
 # 不依赖 115 官网在构建期可用；版本升级只需替换 deb 并改 VERSION。

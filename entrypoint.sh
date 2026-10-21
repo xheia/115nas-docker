@@ -7,10 +7,18 @@
 #
 # 环境变量（均有默认值，可用 docker -e 覆盖）：
 #   SCREEN_WIDTH/HEIGHT/DEPTH  虚拟屏幕（默认 1280x800x24）
+#   VNC_FRAME_RATE             VNC 帧率上限（默认 25）。Xtigervnc 默认 60fps，
+#                              它每发一帧都要在本机 CPU 上做 Tight/JPEG 编码，
+#                              而文件管理界面根本用不到 60fps——限帧是这套栈上
+#                              最有效的提速手段。设 0 关闭限制。
+#   NOVNC_QUALITY              noVNC JPEG 画质 0-9（默认 5；官方默认 6）
+#   NOVNC_COMPRESSION          noVNC 压缩级别 0-9（默认 1）。官方文档写明：
+#                              level 1 消耗最少 CPU，高等级只用于极慢网络。
+#                              局域网里调高等于让 NAS 白烧 CPU 换用不上的带宽。
 #   VNC_PORT                   VNC 监听端口（默认 5900）
 #   VNC_BIND                   VNC 监听地址（默认 127.0.0.1，只允许容器内 noVNC 连接）。
-#                              设为 0.0.0.0 才会对外暴露 5900——仅用于「Cloudflare
-#                              浏览器渲染 VNC」或原生 VNC 客户端直连，必须同时设密码
+#                              设为 0.0.0.0 才会对外暴露 5900——仅用于原生 VNC
+#                              客户端直连，必须同时设密码
 #   HTTP_PORT / HTTPS_PORT     noVNC 对外端口（默认 6080 / 6081）
 #   VNC_PASSWORD               可选；设置后 noVNC 连接需输入密码
 #   HTTPS_CERT                 HTTPS 证书（PEM，证书+私钥合一），默认 /certs/server.pem
@@ -46,6 +54,12 @@ VNC_BIND=${VNC_BIND:-127.0.0.1}
 HTTP_PORT=${HTTP_PORT:-6080}
 HTTPS_PORT=${HTTPS_PORT:-6081}
 VNC_PASSWORD=${VNC_PASSWORD:-}
+# 性能三件套（见文件头说明）。这三项直接决定 NAS 的 CPU 占用：
+#   FrameRate   60 -> 25 约砍掉 2/3 的帧编码量
+#   compression 3  -> 1  约让 Tight 的 zlib 开销减半
+VNC_FRAME_RATE=${VNC_FRAME_RATE:-25}
+NOVNC_QUALITY=${NOVNC_QUALITY:-5}
+NOVNC_COMPRESSION=${NOVNC_COMPRESSION:-1}
 HTTPS_CERT=${HTTPS_CERT:-/certs/server.pem}
 NOVNC_WEB=/usr/share/novnc
 VNC_PASS_FILE=/tmp/115nas-vnc.pass
@@ -63,6 +77,45 @@ cleanup() {
     exit 0
 }
 trap cleanup TERM INT
+
+# --------------------------------------------- 0. 设备标识持久化（风控）
+# 115 客户端会采集主机标识。容器里有两处每次重建都会变：
+#   ① /etc/machine-id —— 由下面的 dbus-uuidgen 生成，写在 overlay 层，
+#      `docker compose up -d` 重建容器就重新生成；
+#   ② hostname —— compose 不写 hostname: 时它就是容器 ID。
+# 而 latest 镜像每周跟随官方版本，一有新 deb 就要重建，于是设备标识跟着变。
+# 在 115 侧看就是「又来了一台新设备在新环境登录」——短时间内反复出现，
+# 足以触发异地登录风控（用户 2026-10-21 收到的正是这类提示）。
+# 处理：首份 machine-id 落到持久卷 /config，之后每次启动恢复原值。
+# hostname 由 compose 的 hostname: 固定，见 docker-compose.yml。
+persist_machine_id() {
+    local store=/config/machine-id
+    mkdir -p /config 2>/dev/null
+
+    # 卷里已有值：覆盖回去，容器就恢复了原来的身份，重建多少次都不变
+    if [ -s "$store" ]; then
+        if cp -f "$store" /etc/machine-id 2>/dev/null; then
+            log "machine-id restored from volume ($(cut -c1-8 "$store")...)"
+        else
+            log "WARNING: /etc/machine-id not writable; identity will drift on rebuild"
+        fi
+        return
+    fi
+
+    # 首次启动：确保 /etc/machine-id 有值，再存进卷
+    if [ ! -s /etc/machine-id ]; then
+        { dbus-uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-'; } \
+            > /etc/machine-id 2>/dev/null
+    fi
+    # 只有确实拿到非空值才落盘——否则会存一个空文件，下次启动误判成
+    # 「已持久化」，反而把新生成的 id 又覆盖掉，等于没修。
+    if [ -s /etc/machine-id ] && cp -f /etc/machine-id "$store" 2>/dev/null; then
+        log "machine-id seeded to volume ($(cut -c1-8 "$store")...); it now survives container rebuilds"
+    else
+        log "WARNING: could not persist machine-id to $store (check the /config volume)"
+    fi
+}
+persist_machine_id
 
 # ---------------------------------------------------------------- 1. dbus
 # libsecret（保存登录态）、GTK、WebKit、libnotify 都会用到 dbus。
@@ -127,6 +180,14 @@ wait_vnc_port() {
 
 start_tigervnc() {
     local sec="None" pw=""
+    # 帧率上限：Xvnc 每发一帧都要在本机 CPU 上做 Tight/JPEG 编码。Xtigervnc
+    # 默认 -FrameRate=60，对文件管理界面是纯浪费。老版本没有这个参数，先探测；
+    # 加 timeout 是防它在 -help 上挂住卡住整个启动。
+    local fps_flag=""
+    if [ "${VNC_FRAME_RATE}" != "0" ] \
+       && timeout 5 Xtigervnc -help 2>&1 | grep -q -- "-FrameRate"; then
+        fps_flag="-FrameRate ${VNC_FRAME_RATE}"
+    fi
     if [ -n "$VNC_PASSWORD" ]; then
         rm -f "$VNC_PASS_FILE"
         # -f = filter mode：stdin 读明文口令，stdout 输出加密后的口令文件
@@ -154,12 +215,17 @@ start_tigervnc() {
         -rfbport "$VNC_PORT" \
         $LOCAL_FLAG \
         -SecurityTypes "$sec" $pw \
-        -AlwaysShared -ac -desktop 115nas \
+        -AlwaysShared -ac -desktop 115nas $fps_flag \
         >"$LOG_DIR/xvnc.log" 2>&1 &
     XVNC_PID=$!
     if wait_vnc_port; then
         VNC_MODE="tigervnc"
         log "Xtigervnc listening on $VNC_BIND:$VNC_PORT (pid $XVNC_PID)"
+        if [ -n "$fps_flag" ]; then
+            log "  frame rate capped at ${VNC_FRAME_RATE}fps (was 60 by default)"
+        else
+            log "  WARNING: -FrameRate unsupported by this Xtigervnc, running at the default 60fps"
+        fi
         return 0
     fi
     kill "$XVNC_PID" 2>/dev/null
@@ -221,6 +287,18 @@ log "display ready (mode=$VNC_MODE, ${W}x${H}x${D})"
 openbox >"$LOG_DIR/openbox.log" 2>&1 &
 OB_PID=$!
 log "openbox started (pid $OB_PID)"
+
+# ------------------------------------------------- 3.5 字体缓存预热
+# $XDG_CACHE_HOME=/cache 是挂卷，首次启动时是空的。镜像里装了 Noto CJK
+# （十个字体文件、约 200MB），fc-cache 冷扫描在 NAS 这种 CPU 上要好几秒，
+# 表现为「窗口已经出来，但文字要迟一会儿才显示」。构建时已把缓存算好放在
+# /opt/fontconfig-cache，这里只在缓存目录还不存在时复制一次（之后由卷留存）。
+if [ -d /opt/fontconfig-cache ] && [ ! -d "${XDG_CACHE_HOME:-/cache}/fontconfig" ]; then
+    mkdir -p "${XDG_CACHE_HOME:-/cache}" 2>/dev/null
+    if cp -a /opt/fontconfig-cache "${XDG_CACHE_HOME:-/cache}/fontconfig" 2>/dev/null; then
+        log "fontconfig cache seeded from image (skips the first-run font scan)"
+    fi
+fi
 
 # ---------------------------------------------------------------- 4. fcitx5 中文输入
 # 容器内跑 fcitx5 拼音输入法：noVNC 窗口里按 Ctrl+Space 呼出，拼音候选项
@@ -289,7 +367,10 @@ fi
 #
 # WS_PATH：反代改写了路径（例如额外加了 /115nas/ 前缀）时用它指定 noVNC 的 WS 端点。
 gen_index() {
-    local qs="autoconnect=1&resize=scale&quality=6&compression=3&reconnect=1&reconnect_delay=3000&show_dot=1"
+    # 画质/压缩从环境变量取（默认 5 / 1）。noVNC 文档写明 compression 的
+    # level 1 消耗最少 CPU、高等级只用于极慢网络——这里跑在局域网，把级别
+    # 调高只会让 NAS 的 CPU 白烧，换来的带宽根本用不上。
+    local qs="autoconnect=1&resize=scale&quality=${NOVNC_QUALITY}&compression=${NOVNC_COMPRESSION}&reconnect=1&reconnect_delay=3000&show_dot=1"
 
     # 默认**不**把密码写进 URL：地址栏、浏览器历史、反代访问日志都会留下它。
     # 不带 password 参数时，noVNC 收到 RFB 的 credentialsrequired 会自己弹密码框
@@ -393,7 +474,9 @@ var WSPATH = "__WSPATH__";
         if (ok) {
             msg.className = 'ok';
             msg.textContent = '连接正常，正在进入…';
-            setTimeout(function () { location.replace('vnc.html?' + QS); }, 300);
+            // 立刻跳转：这里的 WS 连接只是探测，已经证明通道可用，
+            // 再等 300ms 纯属白让用户看一瞬提示（原实现如此）。
+            location.replace('vnc.html?' + QS);
             return;
         }
         msg.className = 'bad';
@@ -577,8 +660,9 @@ LIFE_PID=$!
 
 log "115nas container is up"
 log "  noVNC page : http://<host>:$HTTP_PORT/   (https://<host>:$HTTPS_PORT/)"
-log "  VNC target : $VNC_BIND:$VNC_PORT (raw VNC; only for direct clients / Cloudflare browser-rendered VNC)"
+log "  VNC target : $VNC_BIND:$VNC_PORT (raw RFB; for native VNC clients only)"
 log "  display    : $VNC_MODE (tigervnc = UTF-8 clipboard; x11vnc = Latin-1, CJK garbles)"
+log "  perf       : frame rate ${VNC_FRAME_RATE}fps, noVNC quality ${NOVNC_QUALITY}, compression ${NOVNC_COMPRESSION}"
 
 # ---------------------------------------------------------------- 8. 常驻
 # sleep+wait 组合让 trap 能立即响应停止信号。
