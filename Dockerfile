@@ -99,7 +99,7 @@ RUN mkdir -p /tmp/fccache; \
 
 # ---- 官方 115 生活客户端（deb 随仓库分发，构建时 COPY 进来）-----------------
 # 不依赖 115 官网在构建期可用；版本升级只需替换 deb 并改 VERSION。
-ARG LIFE_DEB=115Life_37.3.1.deb
+ARG LIFE_DEB=115Life_37.3.2.deb
 COPY ${LIFE_DEB} /tmp/115life.deb
 RUN dpkg -i /tmp/115life.deb \
  && apt-get update \
