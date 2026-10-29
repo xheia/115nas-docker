@@ -1,8 +1,12 @@
 # 115nas — 115 生活客户端 Docker 版
 services:
   115nas:
-    # 默认用发布版镜像（ghcr.io）。想锁定版本就把 :latest 换成具体 tag
-    # （如 :1.1.2，对应 115Life 37.3.1）；想本地构建就取消 build: . 的注释。
+    # 默认跟最新版。想锁定就用具体 tag：
+    #   :client-37.3.1   只锁 115 客户端版本（新客户端出问题时可退回上一版），脚本仍随项目更新
+    #   :1.1.5           固定本项目版本（脚本与客户端一起冻结，最保守）
+    # 想本地构建：取消 build: . 的注释，并用
+    #   docker build --build-arg LIFE_DEB=115Life_<客户端版本>.deb .
+    # 选择内置哪个版本的 115 客户端。
     image: ghcr.io/xheia/115nas-docker:latest
     container_name: 115nas
     hostname: 115nas

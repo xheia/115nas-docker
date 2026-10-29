@@ -17,7 +17,7 @@
 # Xtigervnc 支持该扩展，noVNC 1.2.0+ 亦支持，双方自动协商 UTF-8 传输。
 # x11vnc 仍保留在镜像里作为回退（若 TigerVNC 无法启动）。
 
-# 基础镜像选型：debian:12-slim。官方 115Life_37.3.1.deb 的 Depends 同时要求：
+# 基础镜像选型：debian:12-slim。官方 115Life deb 的 Depends 同时要求：
 #   * libwebkit2gtk-4.1-0（WebKitGTK 4.1 API，登录二维码 WebView 用）
 #   * libgtk-3-0 / libssl3（未改名的旧包名）
 # Ubuntu 22.04 没有 4.1 版 WebKitGTK；Ubuntu 24.04 把后两者改成 t64 后缀
@@ -98,7 +98,11 @@ RUN mkdir -p /tmp/fccache; \
     rm -rf /tmp/fccache
 
 # ---- 官方 115 生活客户端（deb 随仓库分发，构建时 COPY 进来）-----------------
-# 不依赖 115 官网在构建期可用；版本升级只需替换 deb 并改 VERSION。
+# 仓库可同时存放多个客户端版本的 deb，构建时用 --build-arg LIFE_DEB=<文件名> 选定：
+#   docker build --build-arg LIFE_DEB=115Life_37.3.1.deb .   # 退回旧客户端
+# 下面的默认值只代表「本地直接 docker build 时用哪个」；CI 会为每个 deb 各出一个
+# 镜像，tag 为 client-<版本>，详见 README「选择 115 客户端版本」。
+# 不依赖 115 官网在构建期可用；新增版本只需把新 deb 放进仓库。
 ARG LIFE_DEB=115Life_37.3.2.deb
 COPY ${LIFE_DEB} /tmp/115life.deb
 RUN dpkg -i /tmp/115life.deb \

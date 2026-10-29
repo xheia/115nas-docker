@@ -46,6 +46,37 @@ services:
 > 完整注释版见仓库根目录的 `docker-compose.yml`。国内拉取 ghcr.io 慢的话，  
 > 把 `image` 换成 Docker Hub 的 `xheia/115nas-docker:latest`（内容一致）。
 
+## 选择 115 客户端版本
+
+镜像里内置的是官方 115 生活 Linux 客户端。官方每次升级，`latest` 会跟着换成新客户端，
+但**旧版本镜像不会下线**——每个打包过的客户端版本都有固定 tag：
+
+| tag | 锁住什么 | 什么时候用 |
+| --- | --- | --- |
+| `latest` / `main` / `edge` | 最新脚本 + 最新客户端 | 默认，跟着官方更新走 |
+| `client-37.3.1` | 只锁 115 客户端版本，脚本仍随项目更新 | 新版客户端出问题时退回上一版 |
+| `1.1.5` 这类版本号 | 整个项目（脚本与客户端一起冻结） | 完全不想动，最保守 |
+
+tag 里的数字就是内置客户端的版本，与仓库中 `115Life_37.3.1.deb` 的文件名一一对应；
+装了哪个版本可以用 `dpkg-query` 直接核对（见下）。
+
+切换只改 compose 里的 `image`，然后重新拉起：
+
+```yaml
+    image: ghcr.io/xheia/115nas-docker:client-37.3.1   # 退回 37.3.1
+```
+
+```bash
+docker compose pull && docker compose up -d
+docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装的版本
+```
+
+> 换版本**不影响登录态**：`/config`、`/appdata` 是宿主机目录，与镜像版本无关。
+> 但降级前先备份 `./data`——客户端会升级自己的本地库，新版写过的库旧版未必读得回来。
+
+可选的版本以镜像仓库 Tags 列表为准（GitHub Packages 或 Docker Hub 页面）。
+仓库里只保留最近 3 个版本的 deb 以控制体积，更早版本对应的镜像仍能 pull，只是不再随本项目更新。
+
 ## 目录与配置
 
 | 容器内路径               | 宿主机              | 说明                               |
@@ -121,5 +152,5 @@ noVNC / websockify 本身**没有账号体系**，谁打开页面谁就能操作
 ## 版权与许可
 
 - 本项目代码（Dockerfile / entrypoint.sh / compose）：MIT
-- `115Life_37.3.2.deb` 版权归 **广东一一五科技股份有限公司** 所有，  
+- 仓库内的 `115Life_*.deb`（官方 Linux 客户端安装包）版权归 **广东一一五科技股份有限公司** 所有，  
   本仓库仅打包其官方 deb 以便离线构建，不修改其内容

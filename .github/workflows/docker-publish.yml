@@ -7,9 +7,16 @@ name: Publish Docker image
 #   3. GitHub 仓库页面手动：Actions → Publish Docker image → Run workflow
 #
 # 产物（均为 linux/amd64——官方 deb 只有 amd64，无法构建 ARM 镜像）：
-#   定时/手动触发：ghcr.io/xheia/115nas-docker:{main,edge,latest}
-#                 （配了 Docker Hub 密钥则同步推 <DOCKERHUB_USERNAME>/115nas-docker）
-#   标签推送 v*  ：ghcr.io/xheia/115nas-docker:<version> + :latest
+#   仓库里每个 115Life_<ver>.deb 各构建一个镜像，tag 为 client-<ver>：
+#     ghcr.io/xheia/115nas-docker:client-37.3.1
+#     ghcr.io/xheia/115nas-docker:client-37.3.2
+#   最高版本额外获得 latest（定时/手动还打 main + edge；标签推送 v* 还打 <version>）。
+#   用户改 image tag 即可切换或锁定 115 客户端版本，详见 README「选择客户端版本」。
+#   配了 Docker Hub 密钥则同步推 <DOCKERHUB_USERNAME>/115nas-docker。
+#
+# 为什么要保留多版本 deb：官方客户端升级不一定都对所有人友好（曾出现登录风控、
+# 界面改版），能退回上一个客户端版本是可用的退路。旧 deb 在 git 历史里删不掉，
+# 所以只保留最近 KEEP 个（默认 3），避免仓库无限膨胀。
 #
 # 上游版本检测源（115 官方接口，免登录，实测海外 runner 可达 ~1s）：
 #   https://appversion.115.com/1/web/1.0/api/getMultiVer
@@ -55,22 +62,25 @@ jobs:
           set -euo pipefail
           curl -sS -m 30 "https://appversion.115.com/1/web/1.0/api/getMultiVer" -o /tmp/mv.json
           python3 - <<'PYEOF'
-          import json, re, os
+          import json, re, os, glob
           d = json.load(open('/tmp/mv.json'))
           entry = d['data']['115Life_Linux']
           up, url = entry['version_code'], entry['version_url']
           notice = entry.get('version_notice_url', '')
-          df = open('Dockerfile', encoding='utf-8').read()
-          m = re.search(r'^ARG LIFE_DEB=115Life_([0-9.]+)\.deb', df, re.M)
-          if not m:
-              raise SystemExit('Dockerfile 中找不到 ARG LIFE_DEB=115Life_<ver>.deb')
-          cur = m.group(1)
+          # 当前版本取仓库里已打包的最高 deb，而不是 Dockerfile 里的默认值——
+          # 多版本共存后 ARG 只代表「本地构建默认用哪个」，不代表已有哪些版本。
+          debs = [m.group(1) for p in glob.glob('115Life_*.deb')
+                  if (m := re.match(r'115Life_([0-9.]+)\.deb$', p))]
+          if not debs:
+              raise SystemExit('仓库里没有 115Life_*.deb，无法判断当前版本')
           tup = lambda s: tuple(int(x) for x in s.split('.'))
+          cur = max(debs, key=tup)
           changed = tup(up) > tup(cur)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'upstream={up}\ncurrent={cur}\nurl={url}\nnotice={notice}\n')
               f.write(f'changed={"true" if changed else "false"}\n')
           print(f'upstream={up}  current={cur}  changed={changed}')
+          print(f'bundled so far: {", ".join(sorted(debs, key=tup))}')
           PYEOF
 
       # ---- 有新版本：下载、校验、替换 deb、更新 Dockerfile/README、提交 ----
@@ -92,11 +102,23 @@ jobs:
           if [ "$SZ" -lt 50000000 ]; then
             echo "::error::deb 大小异常 (${SZ}B)，放弃提交"; exit 1
           fi
-          rm -f "115Life_${CUR}.deb"
+          # 旧版本 deb 保留不删：用户要能退回上一版客户端，client-<旧版本> 镜像
+          # 也要能随代码修复重建。Dockerfile 的 ARG 只跟着最新版走（本地构建默认值）。
           sed -i "s/^ARG LIFE_DEB=115Life_[0-9.]*\.deb/ARG LIFE_DEB=115Life_${UP}.deb/" Dockerfile
           if grep -q "115Life_${CUR}\.deb" README.md; then
             sed -i "s/115Life_${CUR}\.deb/115Life_${UP}.deb/g" README.md
           fi
+          # 只保留最近 KEEP 个版本。deb 一旦进过 git 历史就永久占空间（约 80MB/版），
+          # 不设上限时仓库会以每年数百 MB 膨胀。被裁掉的旧 client-* 镜像已在
+          # registry 里，仍可 pull，只是不能再重建。
+          KEEP=3
+          TRIMMED=$(ls -1 115Life_*.deb | sort -V | head -n -${KEEP} || true)
+          if [ -n "$TRIMMED" ]; then
+            echo "$TRIMMED" | xargs -r rm -f
+            echo "超出保留数量($KEEP)已移除：$TRIMMED"
+          fi
+          echo "当前打包的客户端版本："
+          ls -1 115Life_*.deb | sort -V
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
@@ -114,13 +136,25 @@ jobs:
             }
           fi
 
-      # ---- 客户端版本号（写进镜像 label，docker inspect 可见）----
-      - name: Read client version
-        id: ver
+      # ---- 枚举仓库里打包的客户端版本 ----
+      - name: Enumerate bundled client versions
+        id: vers
         run: |
-          CV=$(sed -n 's/^ARG LIFE_DEB=115Life_\([0-9.]*\)\.deb.*/\1/p' Dockerfile)
-          echo "client_version=$CV" >> "$GITHUB_OUTPUT"
-          echo "client version: $CV"
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, os, re
+          vers = [m.group(1) for p in glob.glob('115Life_*.deb')
+                  if (m := re.match(r'115Life_([0-9.]+)\.deb$', p))]
+          if not vers:
+              raise SystemExit('仓库里没有 115Life_*.deb')
+          tup = lambda s: tuple(int(x) for x in s.split('.'))
+          vers.sort(key=tup)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('list=' + ' '.join(vers) + '\n')
+              f.write('latest=' + vers[-1] + '\n')
+          print('将构建:', ', '.join(vers))
+          print('latest 指向:', vers[-1])
+          PY
 
       # ---- ghcr.io（自动使用 GITHUB_TOKEN）----
       - name: Log in to ghcr.io
@@ -141,41 +175,72 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ---- 计算镜像标签 ----
-      # 标签推送 v1.2.3 → 1.2.3 + latest；定时/手动（分支）→ main + edge + latest
-      - name: Compute image tags
-        id: tags
+      # ---- 每个客户端版本各构建一个镜像 ----
+      # tag 规则：client-<客户端版本>（永远打）
+      #           最高版本额外 → latest（分支触发再加 main+edge，标签推送再加 <version>）
+      - name: Build and push every bundled client version
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          REF="${{ github.ref_name }}"
-          VER="${REF#v}"
-          GHCR="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
-          if [ "${REF#v}" != "$REF" ]; then
-            TAGS="${GHCR}:${VER},${GHCR}:latest"
-          else
-            TAGS="${GHCR}:main,${GHCR}:edge,${GHCR}:latest"
-          fi
-          if [ -n "$DH_USER" ]; then
-            if [ "${REF#v}" != "$REF" ]; then
-              TAGS="${TAGS},${DH_USER}/$IMAGE_NAME:${VER},${DH_USER}/$IMAGE_NAME:latest"
-            else
-              TAGS="${TAGS},${DH_USER}/$IMAGE_NAME:main,${DH_USER}/$IMAGE_NAME:edge,${DH_USER}/$IMAGE_NAME:latest"
+          set -euo pipefail
+          GHCR="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}"
+          LATEST="${{ steps.vers.outputs.latest }}"
+          # 降序：latest 指向的版本先构建。旧版本万一构建失败，latest 已经发出去，
+          # 不至于让所有人拿不到新镜像。
+          VERS=$(echo "${{ steps.vers.outputs.list }}" | tr ' ' '\n' | sort -Vr)
+          FAILED=""
+          for VER in $VERS; do
+            TAGS="${GHCR}:client-${VER}"
+            if [ "$VER" = "$LATEST" ]; then
+              if [ "${REF_NAME#v}" != "$REF_NAME" ]; then
+                TAGS="${TAGS},${GHCR}:${REF_NAME#v},${GHCR}:latest"
+              else
+                TAGS="${TAGS},${GHCR}:main,${GHCR}:edge,${GHCR}:latest"
+              fi
             fi
-          fi
-          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
-          echo "将推送: $TAGS"
+            if [ -n "${DH_USER:-}" ]; then
+              DH="${DH_USER}/${IMAGE_NAME}"
+              TAGS="${TAGS},${DH}:client-${VER}"
+              if [ "$VER" = "$LATEST" ]; then
+                if [ "${REF_NAME#v}" != "$REF_NAME" ]; then
+                  TAGS="${TAGS},${DH}:${REF_NAME#v},${DH}:latest"
+                else
+                  TAGS="${TAGS},${DH}:main,${DH}:edge,${DH}:latest"
+                fi
+              fi
+            fi
 
-      # ---- 构建并推送（amd64）----
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            CLIENT_VERSION=${{ steps.ver.outputs.client_version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            IFS=',' read -r -a _tags <<< "$TAGS"
+            TAGARGS=()
+            for t in "${_tags[@]}"; do TAGARGS+=(-t "$t"); done
+
+            echo "════════ client ${VER} ════════"
+            printf '  %s\n' "${_tags[@]}"
+
+            # cache 不按版本分 scope：apt 那一大段是各版本共用的，复用能省掉
+            # 每次一两分钟的 apt install；deb 之后的层本来也不可能命中。
+            if docker buildx build \
+                 --platform linux/amd64 \
+                 --push \
+                 --build-arg "LIFE_DEB=115Life_${VER}.deb" \
+                 --build-arg "CLIENT_VERSION=${VER}" \
+                 --cache-from type=gha \
+                 --cache-to type=gha,mode=max \
+                 "${TAGARGS[@]}" \
+                 . ; then
+              echo "✓ client ${VER} 已推送"
+            else
+              FAILED="${FAILED} ${VER}"
+              echo "::warning::client ${VER} 构建或推送失败"
+              if [ "$VER" = "$LATEST" ]; then
+                echo "::error::最新客户端 ${VER} 构建失败——latest 指向它，本次发布不完整"
+                exit 1
+              fi
+            fi
+          done
+          if [ -n "$FAILED" ]; then
+            echo "::warning::以下版本未能重建（registry 里已有的旧镜像不受影响）：${FAILED}"
+          fi
 
       # ---- ghcr 包默认 private，尝试改成 public（失败不阻断）----
       # 根因（2026-10-18 实测）：GITHUB_TOKEN 是 installation token，PATCH
@@ -265,3 +330,31 @@ jobs:
               raise SystemExit(1)
           print('Docker Hub 仓库概述已同步')
           PY
+
+      # ---- 本次产出的镜像标签清单（Actions 运行页面直接可见）----
+      # if: always() —— 构建失败时这份清单更有用，能看出哪些版本已经推出去了。
+      - name: Summarize published tags
+        if: always()
+        run: |
+          VERS="${{ steps.vers.outputs.list }}"
+          LATEST="${{ steps.vers.outputs.latest }}"
+          GHCR="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}"
+          {
+            echo "## 本次产出的镜像"
+            echo
+            if [ -z "$VERS" ]; then
+              echo "未能枚举客户端版本（前面的步骤已失败），详见上方日志。"
+            else
+              echo "| 115 客户端 | 镜像标签 |"
+              echo "| --- | --- |"
+              for VER in $VERS; do
+                if [ "$VER" = "$LATEST" ]; then
+                  echo "| **${VER}** → latest | \`${GHCR}:client-${VER}\`<br>\`${GHCR}:latest\` |"
+                else
+                  echo "| ${VER} | \`${GHCR}:client-${VER}\` |"
+                fi
+              done
+              echo
+              echo "切换或锁定客户端版本：把 compose 里 image 的 tag 换成对应的 \`client-<版本>\`。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

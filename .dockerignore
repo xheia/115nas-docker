@@ -1,0 +1,9 @@
+# 构建上下文只需要 Dockerfile / entrypoint.sh / 选中的那个 115Life_*.deb
+# （deb 不能排除：Dockerfile 用 COPY ${LIFE_DEB} 引用它）
+.git
+.github
+data
+logs
+*.log
+README.md
+docker-compose.yml
