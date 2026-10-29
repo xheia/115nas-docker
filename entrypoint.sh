@@ -240,11 +240,15 @@ start_tigervnc() {
     # grep -help 是空手而归，但参数明明是支持的（man Xvnc 有），于是白白退化成
     # 60fps 还打一条误导性的 WARNING。改成在二进制里找选项字符串，这才是
     # Xvnc 参数表的真实内容。
+    #
+    # 匹配串**不带前导短横**：ddxProcessArgument() 是 vncSetParam(&argv[i][1], ...)，
+    # 先把 '-' 剥掉再查表，所以二进制里存的是 "FrameRate"；只有 Configuration::list()
+    # 打印时才在后面补 "%s -"。搜 "-FrameRate" 一样是空手（v1.1.4 之前就栽在这）。
     local fps_flag=""
     if [ "${VNC_FRAME_RATE}" != "0" ]; then
         local xt_bin
         xt_bin=$(command -v Xtigervnc 2>/dev/null || true)
-        if [ -n "$xt_bin" ] && grep -qa -- "-FrameRate" "$xt_bin" 2>/dev/null; then
+        if [ -n "$xt_bin" ] && grep -qa -- "FrameRate" "$xt_bin" 2>/dev/null; then
             fps_flag="-FrameRate ${VNC_FRAME_RATE}"
             FPS_EFFECTIVE=$VNC_FRAME_RATE
         fi
