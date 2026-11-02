@@ -54,7 +54,10 @@ D=${SCREEN_DEPTH:-24}
 VNC_PORT=${VNC_PORT:-5900}
 HTTP_PORT=${HTTP_PORT:-6080}
 
-# 只允许回环：RFB 协议本身没有账号体系（VNC 口令是弱共享口令），
+# 以下两项**只对降级路径（Xvfb + x11vnc）生效**。
+# KasmVNC 走 websocket 模式，RFB 与 HTTP 共用 HTTP_PORT，没有独立的 5900。
+#
+# 降级路径上只允许回环：RFB 协议本身没有账号体系（VNC 口令是弱共享口令），
 # 暴露到容器外等于任何能连 5900 的人都能操作 115 账号。
 VNC_BIND=${VNC_BIND:-127.0.0.1}
 

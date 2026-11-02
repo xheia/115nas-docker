@@ -22,8 +22,9 @@ done
 
 echo
 echo "=== 监听端口 ==="
+# KasmVNC 模式下只有 6080（HTTP/WS/RFB 合一）；5900 只在降级路径存在。
 if command -v ss >/dev/null 2>&1; then
-    ss -lntp 2>/dev/null | grep -E ':(5900|6080)\b' || echo "  (5900/6080 都没在监听)"
+    ss -lntp 2>/dev/null | grep -E ':(5900|6080)\b' || echo "  (6080 没在监听；5900 仅降级模式才有)"
 else
     echo "  (镜像里没有 ss)"
 fi

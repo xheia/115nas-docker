@@ -107,7 +107,7 @@ docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装�
 | `VNC_WEBP_TIME`                                   | `5`                                             | WebP 编码耗时预算，越大越清晰越费 CPU                                                          |
 | `HTTP_PORT`                                       | 6080                                            | 容器内 Web 端口。一般不用动；端口冲突改 compose 里 `ports` 的**左边**就够                               |
 | `VNC_PASSWORD`                                    | 空                                               | 设置后浏览器出现登录框。**公网暴露务必设置**                                                         |
-| `VNC_BIND`                                        | `127.0.0.1`                                     | 设 `0.0.0.0` 才对外开放 5900（原生 VNC 直连）——**必须同时设口令，否则拒绝启动**                            |
+| `VNC_BIND`                                        | `127.0.0.1`                                     | **只对降级模式（`DISPLAY_MODE=fallback`）生效**：设 `0.0.0.0` 才对外开放 5900，且必须同时设 `VNC_PASSWORD`，否则拒绝启动 |
 | `VNC_TLS_CERT`                                    | `/certs/server.pem`                             | 挂载 PEM（证书+私钥合一）后，6080 改走 HTTPS/WSS                                               |
 | `DISPLAY_MODE`                                    | `auto`                                          | `kasmvnc` / `fallback` 可强制指定，排障用                                                 |
 | `HIDE_SYSTEM_PATHS`                               | `1`                                             | 文件选择器侧栏钉上常用目录书签，设 `0` 关闭                                                         |

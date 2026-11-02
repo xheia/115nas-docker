@@ -24,17 +24,21 @@ start_kasmvnc() {
     [ -d "$www" ] || www=/usr/share/kasmvnc/www
     [ -d "$www" ] || { warn "kasmvnc: 找不到 web 资源目录（预期 $KASM_WWW）"; return 1; }
 
-    # ---- 绑定与认证 ----
-    # RFB（5900）默认只听回环；能对外的只有 HTTP/WS 端口。
-    local rfb_bind_args=(-localhost)
-    if [ "$VNC_BIND" != "127.0.0.1" ]; then
-        [ -n "$VNC_PASSWORD" ] || fatal "VNC_BIND=$VNC_BIND 会把 RFB 暴露到容器外，但没有 VNC_PASSWORD；拒绝启动"
-        rfb_bind_args=()
-        warn "RFB 绑定到 $VNC_BIND（容器外可达），请确保它只在隧道/VPN 后面"
-    fi
-
-    # RFB 层始终不放认证：KasmVNC 的鉴权在 Web 层（下面的 kasmpasswd），
-    # 而 RFB 本来就只听回环 —— 两条加起来，能对外的只有带登录框的 HTTP/WS。
+    # ---- 监听地址与认证 ----
+    # KasmVNC 默认走 websocket 模式（不传 -noWebsocket）：HTTP、WebSocket、
+    # RFB 全部落在 -websocketPort 这一个端口上。源码 vncExtInit.cc 里
+    # `if (!noWebsocket) createWebsocketListeners(...)` 这条分支**不使用**
+    # rfbport / port 变量，所以这里没有独立的 RFB 端口可绑，VNC_PORT 与
+    # VNC_BIND 只对降级路径（x11vnc）有意义。
+    #
+    # 也**不能**传 -localhost：它把监听地址换成字符串 "local"，
+    # getaddrinfo("local") 会返回 IPv4 与 IPv6 两条记录，而每个
+    # WebsocketListener 都去 bind 同一个抽象 unix socket（.KasmVNCSock<pid>），
+    # 第二条就报 "failed to bind socket: Address already in use" 让 X 直接 Fatal；
+    # 就算绑上了，它也只绑 127.0.0.1，宿主 -p 映射进来的流量根本到不了。
+    # 换成具体地址（0.0.0.0）时 getaddrinfo 只给出一条记录，两个问题一起消失。
+    #
+    # RFB 层仍然不放认证：KasmVNC 的鉴权在 Web 层（下面的 kasmpasswd）。
     # 不显式写 None 的话，TigerVNC 系的默认值是 VncAuth 并要求口令文件，
     # 没设口令时容器会直接起不来。
     local sec_args=(-SecurityTypes None)
@@ -66,8 +70,9 @@ start_kasmvnc() {
     fi
 
     # ---- 编码参数 ----
-    # 这些参数名在这个二进制里都存在（Xkasmvnc 1.5.2 实测 grep 得到）。
     # 不传 -FrameRate 时默认 60fps，是这套栈上最大的浪费。
+    # 这几个名字与 1.5.2 的配置表一致（vncExtInit.cc 里的 rfb::*Parameter
+    # 定义与 common/rfb/Configuration.cc，大小写敏感、不带前导横线）。
     local enc_args=()
     [ "$VNC_FRAME_RATE" != "0" ] && enc_args+=(-FrameRate "$VNC_FRAME_RATE")
     enc_args+=(-CompareFB 2)
@@ -77,7 +82,6 @@ start_kasmvnc() {
     # shellcheck disable=SC2086
     "$bin" ":$DISPLAY_NUM" \
         -geometry "${W}x${H}" -depth "$D" \
-        -rfbport "$VNC_PORT" "${rfb_bind_args[@]}" \
         -httpd "$www" \
         -websocketPort "$HTTP_PORT" -interface 0.0.0.0 \
         "${sec_args[@]}" "${tls_args[@]}" "${enc_args[@]}" \
@@ -85,14 +89,9 @@ start_kasmvnc() {
         >"$LOG_DIR/xkasmvnc.log" 2>&1 &
     XVNC_PID=$!
 
-    # 双重自检：端口通 + 首页确实是 KasmVNC 的客户端。
-    # 只看端口会被「进程活着但参数被拒、HTTP 没起来」骗过去。
-    if ! wait_tcp 127.0.0.1 "$VNC_PORT" 10; then
-        warn "kasmvnc: RFB 端口 $VNC_PORT 未就绪（见 $LOG_DIR/xkasmvnc.log）"
-        tail -n 15 "$LOG_DIR/xkasmvnc.log" 2>/dev/null | while read -r l; do warn "  | $l"; done
-        kill "$XVNC_PID" 2>/dev/null
-        return 1
-    fi
+    # 只等 HTTP 应答。探 5900 在这个模式下没有意义（它不绑那个端口），
+    # 而只看进程存活会被「参数被拒、X 直接 Fatal」骗过去 —— 那时进程号还在，
+    # 端口却永远不会就绪。
     if ! wait_http "$HTTP_PORT" 20; then
         warn "kasmvnc: HTTP 端口 $HTTP_PORT 未就绪（见 $LOG_DIR/xkasmvnc.log）"
         tail -n 15 "$LOG_DIR/xkasmvnc.log" 2>/dev/null | while read -r l; do warn "  | $l"; done
@@ -101,7 +100,7 @@ start_kasmvnc() {
     fi
 
     DISPLAY_BACKEND="kasmvnc"
-    log "Xkasmvnc 已就绪：RFB $VNC_BIND:$VNC_PORT，Web/WS :$HTTP_PORT（pid $XVNC_PID）"
+    log "Xkasmvnc 已就绪：Web/WS :$HTTP_PORT（HTTP、WebSocket、RFB 同一端口，pid $XVNC_PID）"
     log "  编码：frame rate ${VNC_FRAME_RATE}fps，动态画质 ${VNC_QUALITY_MIN}-${VNC_QUALITY_MAX}，webp 预算 ${VNC_WEBP_TIME}ms"
     return 0
 }
