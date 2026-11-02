@@ -293,14 +293,28 @@ jobs:
                  FAIL=1 ;;
           esac
 
-          # ③ WebSocket 握手必须是 101（绕过反代时，容器内的这一段必须自证可用）
-          WS=$(curl -s -i -m 8 --noproxy '*' \
-                 -H "Connection: Upgrade" -H "Upgrade: websocket" \
-                 -H "Sec-WebSocket-Version: 13" \
-                 -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
-                 http://127.0.0.1:16080/websockify 2>/dev/null | head -n 1)
-          echo "WS: ${WS:-（无响应）}"
-          case "$WS" in *101*) echo "OK  WebSocket 101" ;; *) echo "::error::WebSocket 握手没有返回 101"; FAIL=1 ;; esac
+          # ③ WebSocket 握手必须是 101（绕过反代时，容器内的这一段必须自证可用）。
+          #    KasmVNC 的服务端是自己写的 HTTP/WS 栈，握手校验比裸 noVNC 严
+          #    （可能要求 Sec-WebSocket-Protocol），光试一种会得到「不通」的假结论。
+          #    三种变体各试一次，任一是 101 即算通；全不通时把三行原样报出来。
+          H_UP=(-H "Connection: Upgrade" -H "Upgrade: websocket"
+                -H "Sec-WebSocket-Version: 13"
+                -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==")
+          WS_A=$(curl -s -i -m 8 --noproxy '*' "${H_UP[@]}" \
+                   http://127.0.0.1:16080/websockify 2>/dev/null | head -n 1)
+          WS_B=$(curl -s -i -m 8 --noproxy '*' "${H_UP[@]}" -H "Sec-WebSocket-Protocol: binary" \
+                   http://127.0.0.1:16080/websockify 2>/dev/null | head -n 1)
+          WS_C=$(curl -s -i -m 8 --noproxy '*' "${H_UP[@]}" -H "Sec-WebSocket-Protocol: binary" \
+                   http://127.0.0.1:16080/ 2>/dev/null | head -n 1)
+          echo "WS /websockify          : ${WS_A:-（无响应）}"
+          echo "WS /websockify+binary   : ${WS_B:-（无响应）}"
+          echo "WS / +binary            : ${WS_C:-（无响应）}"
+          case "$WS_A$WS_B$WS_C" in
+            *101*) echo "OK  WebSocket 101" ;;
+            *) echo "::error::WebSocket 握手没有返回 101"
+               echo "::error::WS a=${WS_A:-无} | b=${WS_B:-无} | c=${WS_C:-无}"
+               FAIL=1 ;;
+          esac
 
           # ④ 客户端进程活着
           docker exec smoke pgrep -x Life115 >/dev/null 2>&1 \
