@@ -253,11 +253,18 @@ jobs:
           [ "$OK" = "1" ] || { echo "::error::Web 端口 90s 内未就绪"; FAIL=1; }
 
           # ① 首页必须是 KasmVNC 的客户端，而不是 fallback 的 noVNC 页
+          #
+          # 失败时把「到底起了哪个后端」直接塞进 ::error:: —— workflow 日志需要
+          # 认证才能下载，而 annotation 是公开可读的，这是唯一能自助看到真因的通道。
           BODY=$(curl -fsS -m 5 http://127.0.0.1:16080/ 2>/dev/null || true)
           if echo "$BODY" | grep -qi "kasmvnc"; then
             echo "OK  首页是 KasmVNC 客户端"
           else
             echo "::error::首页不是 KasmVNC 客户端 —— 显示栈可能降级了"; echo "$BODY" | head -c 400; FAIL=1
+            flat() { tr '\n' '|' | tr -s ' ' | cut -c1-1200; }
+            echo "::error::首页前 200 字符：$(printf '%s' "$BODY" | flat)"
+            echo "::error::显示栈：$(docker exec smoke sh -c 'grep -aE "显示栈已就绪|降级|kasmvnc:" /logs/entrypoint.log' 2>/dev/null | flat)"
+            echo "::error::xkasmvnc.log 末 40 行：$(docker exec smoke sh -c 'tail -n 40 /logs/xkasmvnc.log 2>/dev/null' | flat)"
           fi
 
           # ② 诊断页可访问
@@ -324,6 +331,8 @@ jobs:
 
           echo "===== entrypoint.log ====="
           docker exec smoke sh -c 'tail -n 40 /logs/entrypoint.log' 2>/dev/null || true
+          echo "===== xkasmvnc.log（末 40 行）====="
+          docker exec smoke sh -c 'tail -n 40 /logs/xkasmvnc.log' 2>/dev/null || true
           echo "===== 115nas-diag ====="
           cat /tmp/diag.txt 2>/dev/null || true
 
