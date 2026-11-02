@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>115 生活 · 连接诊断</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;justify-content:center;padding:24px;
+       background:#f5f6f8;color:#1f2328;
+       font-family:"Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif}
+  .card{width:min(94vw,720px);background:#fff;border:1px solid #e3e6ea;border-radius:12px;
+        padding:22px 24px;box-shadow:0 6px 24px rgba(0,0,0,.06)}
+  h1{margin:0 0 4px;font-size:18px}
+  .sub{margin:0 0 18px;font-size:12px;color:#8a9199}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:0 0 16px}
+  td{padding:7px 0;border-bottom:1px solid #f0f2f4;vertical-align:top}
+  td:first-child{width:132px;color:#57606a}
+  .ok{color:#0f7b0f;font-weight:600}
+  .bad{color:#b42318;font-weight:600}
+  .warn{color:#9a6700;font-weight:600}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#57606a;
+        background:#f6f8fa;border:1px solid #eaeef2;border-radius:6px;padding:7px 9px;
+        word-break:break-all}
+  button{font:inherit;font-size:13px;padding:7px 14px;margin:6px 8px 0 0;cursor:pointer;
+         border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa}
+  button.primary{background:#0969da;border-color:#0969da;color:#fff}
+  ul{margin:16px 0 0;padding-left:20px;font-size:13px;line-height:1.85;color:#3b4249}
+  li{margin-bottom:6px}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:#f6f8fa;
+       border:1px solid #eaeef2;border-radius:4px;padding:1px 5px;color:#0a3069}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>连接诊断</h1>
+  <p class="sub">这个页面只做一件事：确认浏览器到容器的 WebSocket 通道是否通。画面本身不依赖它。</p>
+
+  <table>
+    <tr><td>页面地址</td><td><span id="page" class="mono"></span></td></tr>
+    <tr><td>HTTP 转发</td><td><span id="http">检测中…</span></td></tr>
+    <tr><td>WebSocket</td><td><span id="ws">检测中…</span></td></tr>
+    <tr><td>握手耗时</td><td><span id="cost">—</span></td></tr>
+  </table>
+
+  <div>
+    <button class="primary" onclick="run()">重新检测</button>
+    <button onclick="location.href='./'">回到客户端</button>
+  </div>
+
+  <ul id="hints" class="hide">
+    <li>能打开这个页面 = <b>HTTP 转发是通的</b>；卡住的只是 WebSocket 升级那一段。</li>
+    <li><b>QNAP / 威联通「反向代理」</b>：把<b>目标协议</b>从 <code>HTTP</code> 改成
+        <b>HTTP 和 WebSocket</b>（源协议保持 HTTP，目标仍是 NAS 的 6080 端口）。
+        两端都留纯 HTTP 时 Upgrade 头会被吃掉。</li>
+    <li><b>nginx</b>：<code>proxy_http_version 1.1</code> +
+        <code>proxy_set_header Upgrade $http_upgrade</code> +
+        <code>proxy_set_header Connection $connection_upgrade</code>，并关掉
+        <code>proxy_buffering</code>。</li>
+    <li><b>群晖 DSM</b>：反向代理 → 编辑 → 自定义标题 → 点「WebSocket」自动补两条头。</li>
+    <li><b>Cloudflare</b>：橙云支持 WebSocket，但只监听固定端口（443 / 2053 / 2083 /
+        2087 / 2096 / 8443）；非这些端口要用 Tunnel 映射。</li>
+    <li><b>路径前缀</b>：反代若把路径改写成 <code>/115nas/xxx</code>，需要在反代侧
+        同时透传该前缀，容器本身不再需要 <code>WS_PATH</code>（KasmVNC 固定用
+        <code>websockify</code>，相对本页解析）。</li>
+    <li><b>命令行自检</b>：
+      <code>curl -i -N --noproxy '*' -H "Connection: Upgrade" -H "Upgrade: websocket"
+      -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw=="
+      &lt;本页地址&gt;websockify</code> 必须返回 <code>HTTP/1.1 101</code>。
+      返回 404 就是升级头被中间层剥掉了；<code>--noproxy '*'</code> 不能省，
+      否则本机代理会吃掉升级头，出现假阴性。</li>
+    <li>实在绕不过去：用 <b>TCP 层映射</b>（路由器端口转发 / frp <code>type=tcp</code>）
+        直接指向容器 6080，HTTP 与 WS 一起透传。</li>
+  </ul>
+</div>
+
+<script>
+(function () {
+  var pageEl = document.getElementById('page'),
+      httpEl = document.getElementById('http'),
+      wsEl   = document.getElementById('ws'),
+      costEl = document.getElementById('cost'),
+      hints  = document.getElementById('hints');
+
+  var base = location.href.split('#')[0].split('?')[0].replace(/[^/]*$/, '');
+  var wsUrl = new URL('websockify', base).href.replace(/^http/, 'ws');
+  pageEl.textContent = location.href;
+
+  function set(el, cls, text) { el.className = cls; el.textContent = text; }
+
+  window.run = function () {
+    set(httpEl, '', '检测中…');
+    set(wsEl, '', '检测中…');
+    costEl.textContent = '—';
+    hints.classList.add('hide');
+
+    var t0 = performance.now();
+
+    // 第一步：同源 HTTP（能到这一步一般已经通过，但顺带确认反代没有改路径）
+    // 401/403 说明设了 VNC_PASSWORD —— 那是健康状态，不是故障。
+    fetch(base, { method: 'GET', cache: 'no-store' })
+      .then(function (r) {
+        if (r.ok) set(httpEl, 'ok', '正常（HTTP ' + r.status + '）');
+        else if (r.status === 401 || r.status === 403) set(httpEl, 'ok', '正常（HTTP ' + r.status + '，需要登录）');
+        else set(httpEl, 'bad', '异常（HTTP ' + r.status + '）');
+      })
+      .catch(function (e) { set(httpEl, 'bad', '失败（' + e.message + '）'); });
+
+    // 第二步：真实 WebSocket 握手
+    var settled = false, ws, timer;
+    function done(cls, text) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      set(wsEl, cls, text);
+      costEl.textContent = Math.round(performance.now() - t0) + ' ms';
+      if (cls !== 'ok') hints.classList.remove('hide');
+      try { ws && ws.close(); } catch (e) {}
+    }
+
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e) {
+      done('bad', '地址无法解析（' + e.message + '）');
+      return;
+    }
+    timer = setTimeout(function () {
+      done('bad', '15 秒内没有完成握手：请求没被转发，或后端不可达');
+    }, 15000);
+
+    ws.onopen = function () { done('ok', '握手成功（101）'); };
+    ws.onerror = function () { done('bad', '握手被拒绝或被中断：Upgrade 头很可能被中间层剥掉了'); };
+    ws.onclose = function (ev) {
+      // code 1006 = 异常关闭，通常是握手阶段就断了
+      if (!settled) done('bad', '连接被关闭（code ' + ev.code + (ev.code === 1006 ? '，握手阶段断开' : '') + '）');
+    };
+  };
+
+  run();
+})();
+</script>
+</body>
+</html>

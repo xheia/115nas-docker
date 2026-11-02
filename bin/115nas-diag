@@ -1,0 +1,135 @@
+#!/bin/bash
+# 容器内一键自检：docker exec 115nas 115nas-diag
+#
+# 用来回答五个问题：显示栈用的是哪套、端口在不在听、WebSocket 握手通不通、
+# 图形栈够不够客户端用（X 扩展 + GL 供应商库 + 有没有画出窗口）、
+# 最近有没有进程反复退出。输出直接可贴给人看。
+set -u
+
+echo "=== 基本 ==="
+echo "时间      : $(date '+%F %T %Z')"
+echo "主机名    : $(hostname)"
+echo "机器标识  : $(cut -c1-16 /etc/machine-id 2>/dev/null || echo '(无)')"
+echo "客户端版本: $(dpkg-query -W -f='${Version}' 115life 2>/dev/null || echo '(未安装)')"
+echo "KasmVNC   : $(dpkg-query -W -f='${Version}' kasmvncserver 2>/dev/null || echo '(未安装)')"
+
+echo
+echo "=== 进程 ==="
+for p in Xkasmvnc Xvnc Xvfb x11vnc websockify openbox fcitx5 Life115 dbus-daemon; do
+    n=$(pgrep -c -x "$p" 2>/dev/null || echo 0)
+    printf '  %-12s %s\n' "$p" "$n"
+done
+
+echo
+echo "=== 监听端口 ==="
+if command -v ss >/dev/null 2>&1; then
+    ss -lntp 2>/dev/null | grep -E ':(5900|6080)\b' || echo "  (5900/6080 都没在监听)"
+else
+    echo "  (镜像里没有 ss)"
+fi
+
+echo
+echo "=== 本机 HTTP / WebSocket 自检 ==="
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HTTP_PORT:-6080}/" 2>/dev/null)
+echo "  GET /              -> ${code:-000}"
+echo "  GET /diag.html     -> $(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HTTP_PORT:-6080}/diag.html" 2>/dev/null)"
+# 注意 --noproxy '*'：容器里若有 http_proxy，代理会把 Upgrade 头吃掉，造成假阴性
+ws=$(curl -s -i -m 5 --noproxy '*' \
+        -H "Connection: Upgrade" -H "Upgrade: websocket" \
+        -H "Sec-WebSocket-Version: 13" \
+        -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
+        "http://127.0.0.1:${HTTP_PORT:-6080}/websockify" 2>/dev/null | head -n 1)
+echo "  WS /websockify     -> ${ws:-（无响应）}"
+case "$ws" in
+    *101*) echo "    握手正常：容器这一段是通的，问题若仍在，就在反代/网络层" ;;
+    "")    echo "    无响应：websockify 端点没起来或被拒绝" ;;
+    *)     echo "    非 101：升级头被中间层剥掉了（容器内一般不会这样）" ;;
+esac
+
+echo
+echo "=== 图形栈（决定界面是硬件渲染还是软件渲染）==="
+echo "  DISPLAY      : ${DISPLAY:-（未设置）}"
+DIM=""; EXTS=""
+if command -v xdpyinfo >/dev/null 2>&1; then
+    DIM=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')
+    EXTS=$(xdpyinfo -queryExtensions 2>/dev/null | awk '/^    [A-Za-z]/{print $1}' | tr '\n' ' ')
+fi
+echo "  屏幕尺寸     : ${DIM:-（读不到）}"
+echo "  X 扩展       : ${EXTS:-（读不到）}"
+# 这三个是 Avalonia 画界面时**必须**有的：RANDR 取显示器信息、
+# XInput2 收输入、XTEST 供 IME/自动化注入按键。缺了就不是「慢」，是起不来。
+#
+# 只有真的读到清单才逐项判定：清单读不到时说「缺 XTEST」是把「看不见」
+# 谎报成「没有」，方向就反了（同之前 findmnt 那次教训）。
+if [ -z "$EXTS" ]; then
+    echo "    （读不到扩展清单：xdpyinfo 不可用，或 X 还没起来——先看上面的进程段）"
+else
+    for e in RANDR XInputExtension XTEST; do
+        case " $EXTS " in
+            *" $e "*) printf '    %-16s 有（必需）\n' "$e" ;;
+            *)        printf '    %-16s 无 —— 客户端可能起不来或收不到输入\n' "$e" ;;
+        esac
+    done
+    for e in GLX Present MIT-SHM DRI3; do
+        case " $EXTS " in
+            *" $e "*) printf '    %-16s 有（可选）\n' "$e" ;;
+            *)        printf '    %-16s 无（可选，不影响启动）\n' "$e" ;;
+        esac
+    done
+fi
+# 关键区分：X 服务端注册了 GLX ≠ 客户端能拿到 visual。真正决定的是
+# mesa/nvidia 的供应商库在不在。没有它，Avalonia 的前两个后端必然失败。
+GLV=""
+for f in libGLX_mesa.so.0 libEGL_mesa.so.0 libGLX_nvidia.so.0; do
+    [ -e "/usr/lib/x86_64-linux-gnu/$f" ] && GLV="$GLV $f"
+done
+GLV=${GLV# }
+if [ -n "$GLV" ]; then
+    echo "  GL 供应商库  : $GLV"
+else
+    echo "  GL 供应商库  : 无 → 客户端只能走 Skia 软件渲染（预期行为，不是故障）"
+fi
+echo "  客户端窗口   :"
+if command -v xwininfo >/dev/null 2>&1; then
+    WINS=$(xwininfo -root -children 2>/dev/null | grep -E '^ +0x[0-9a-f]+ ' | head -5)
+    if [ -n "$WINS" ]; then
+        echo "$WINS" | sed 's/^ */    /'
+    else
+        echo "    （没有可见窗口：进程在但没画出界面，看 /logs/life115.log）"
+    fi
+else
+    echo "    （镜像里没有 xwininfo）"
+fi
+
+echo
+echo "=== 落盘权限（下载/上传的文件在 NAS 上长什么样）==="
+LP=$(cat /tmp/115nas-life115.pid 2>/dev/null || true)
+if [ -n "$LP" ] && [ -r "/proc/$LP/status" ]; then
+    # 读的是客户端进程自己的 Umask。别用本 shell 的：docker exec 起的是新进程，
+    # 那里的 umask 是 Docker 默认值，与客户端无关，读出来会误导。
+    echo "  Life115 umask : $(awk '/^Umask:/{print $2}' "/proc/$LP/status" 2>/dev/null || echo '(读不到)')"
+else
+    echo "  Life115 umask : (客户端没在跑，pid 文件：${LP:-空})"
+fi
+for d in /root/Downloads /media/nas; do
+    [ -d "$d" ] || continue
+    echo "  ${d}:"
+    ls -ld "$d" 2>/dev/null | sed 's/^/    /'
+    rows=$(ls -lt "$d" 2>/dev/null | head -4 | sed -n '2,4p')
+    if [ -n "$rows" ]; then echo "$rows" | sed 's/^/    /'; else echo "    (空目录或读不到)"; fi
+done
+echo "  属主 root 是容器以 root 运行的必然结果；其他 uid 要写就设 UMASK=000（只影响新文件）"
+
+echo
+echo "=== 最近日志 ==="
+for f in entrypoint.log xkasmvnc.log life115.log openbox.log fcitx5.log; do
+    [ -f "/logs/$f" ] || continue
+    echo "--- /logs/$f（末 5 行）"
+    tail -n 5 "/logs/$f" | sed 's/^/    /'
+done
+
+echo
+echo "=== 卷占用 ==="
+for d in /config /appdata /cache /logs; do
+    [ -d "$d" ] && printf '  %-10s %s\n' "$d" "$(du -sh "$d" 2>/dev/null | cut -f1)"
+done

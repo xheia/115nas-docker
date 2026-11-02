@@ -6,9 +6,14 @@ Dockerfile     text eol=lf
 *.yml          text eol=lf
 *.yaml         text eol=lf
 *.md           text eol=lf
+# 无扩展名的脚本（bin/ 下的工具）与诊断页同样锁 LF
+bin/*          text eol=lf
+web/*.html     text eol=lf
 # .dockerignore 用 CRLF 时每行末尾带 \r，Docker 会拿 "data\r" 去匹配 "data"，
 # 忽略规则静默失效（构建上下文白传几百 MB），所以同样锁 LF
 .dockerignore  text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
 
 # 官方 deb 是二进制，绝不做行尾转换
 *.deb          binary

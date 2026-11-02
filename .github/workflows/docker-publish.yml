@@ -1,43 +1,51 @@
 name: Publish Docker image
 
 # 触发方式：
-#   1) 定时（每周三 18:00 北京时间）：检查 115 官方 Linux 客户端是否有新版本，
-#      有则自动下载新 deb、更新 Dockerfile 并提交，然后重建发布 latest。
-#   2) 打版本标签推送：git tag v1.1.0 && git push origin v1.1.0
-#   3. GitHub 仓库页面手动：Actions → Publish Docker image → Run workflow
+#   1) 打版本标签推送：git tag v1.1.6 && git push origin v1.1.6
+#      手工发版 —— 产出 :1.1.6 与 :latest。
+#   2) 定时（每周三 18:00 北京时间）：检查 115 官方 Linux 客户端是否有新版本。
+#      有新 deb 时**自动发一次版**：下载 deb → 本地提交 → 构建 + 冒烟测试 →
+#      通过后推镜像（:1.1.x + latest + main + edge）→ 再推提交并打附注 tag v1.1.x。
+#      没有新 deb 时只做一次 :dev-<sha> 构建（:main / :edge / :latest）。
+#   3) 手动：Actions → Publish Docker image → Run workflow
+#      勾上 dry_run 只做构建 + 冒烟测试（不推送、不提交、不打 tag），验证完再打 tag 发版。
 #
-# 产物（均为 linux/amd64——官方 deb 只有 amd64，无法构建 ARM 镜像）：
-#   仓库里每个 115Life_<ver>.deb 各构建一个镜像，tag 为 client-<ver>：
-#     ghcr.io/xheia/115nas-docker:client-37.3.1
-#     ghcr.io/xheia/115nas-docker:client-37.3.2
-#   最高版本额外获得 latest（定时/手动还打 main + edge；标签推送 v* 还打 <version>）。
-#   用户改 image tag 即可切换或锁定 115 客户端版本，详见 README「选择客户端版本」。
-#   配了 Docker Hub 密钥则同步推 <DOCKERHUB_USERNAME>/115nas-docker。
+# 自动发版的版本号：取远端最新的 v1.1.x，patch +1（v1.1.6 → v1.1.7）。
+# tag 是**附注 tag**，说明里写明内置的 115 官方 deb 版本（上一版 → 这一版）、
+# 上游 deb 地址与官方更新说明链接，并同步建一个 GitHub Release。
+# 为什么不靠 tag push 触发构建：GITHUB_TOKEN 推的 tag 不会触发新的 workflow run，
+# 所以镜像必须在同一个 run 里推完，tag 只是「发版记录」，不是触发器。
 #
-# 为什么要保留多版本 deb：官方客户端升级不一定都对所有人友好（曾出现登录风控、
-# 界面改版），能退回上一个客户端版本是可用的退路。旧 deb 在 git 历史里删不掉，
-# 所以只保留最近 KEEP 个（默认 3），避免仓库无限膨胀。
+# 版本语义（1.1.6 起）：版本号就是本项目发版号，每个 1.1.x 冻结当时的客户端。
+# 不再为旧客户端单独出 client-<版本> 镜像 —— 要换客户端版本就换一个 1.1.x tag。
+# 内置的客户端版本同时记录在镜像 label `115nas.client-version`。
+#
+# 发布前必过冒烟测试：镜像先在 runner 上真跑起来，确认 KasmVNC 的 HTTP/WebSocket
+# 起来了、客户端进程活着，才允许 push。没有这一步，参数写错会静默降级成
+# fallback，而用户只看到「变慢了」。
 #
 # 上游版本检测源（115 官方接口，免登录，实测海外 runner 可达 ~1s）：
 #   https://appversion.115.com/1/web/1.0/api/getMultiVer
 #   → data.115Life_Linux.version_code / .version_url
 #   （该地址来自官方 deb 内 Core115.Net.dll 的字符串，非第三方推测）
 #
-# 需要的仓库 Secrets（Settings → Secrets and variables → Actions，均可选）：
-#   DOCKERHUB_USERNAME  Docker Hub 用户名
-#   DOCKERHUB_TOKEN     Docker Hub PAT，Read/Write/Delete（不是登录密码）
-#   GHCR_PAT            带 write:packages 的 PAT，用于自动设 ghcr 包 public
-#                       （GITHUB_TOKEN 调 /user/packages 会 404，管不了用户级包）
-#
+# 需要的仓库 Secrets（均可选，不配就只发 ghcr）：
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   同步 Docker Hub 镜像
+#   GHCR_PAT                               带 write:packages 的 PAT，用来自动设包 public
 # 注意：secrets 上下文不能出现在 steps.if 里（GitHub 限制），
-# 故先注入 job 级 env.DH_USER/DH_TOKEN，再用 env 上下文做条件判断。
+# 所以先注入 job 级 env.DH_USER/DH_TOKEN，再用 env 上下文做条件判断。
 
 on:
   push:
     tags: ["v*"]
   schedule:
-    - cron: "0 10 * * 3"   # 每周三 18:00（UTC+8，周三 = 3）
+    - cron: "0 10 * * 3"   # 每周三 18:00（UTC+8）
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只构建 + 冒烟测试，不推送镜像（验证用）"
+        type: boolean
+        default: false
 
 env:
   IMAGE_NAME: 115nas-docker
@@ -67,12 +75,12 @@ jobs:
           entry = d['data']['115Life_Linux']
           up, url = entry['version_code'], entry['version_url']
           notice = entry.get('version_notice_url', '')
-          # 当前版本取仓库里已打包的最高 deb，而不是 Dockerfile 里的默认值——
-          # 多版本共存后 ARG 只代表「本地构建默认用哪个」，不代表已有哪些版本。
+          # 当前版本取仓库里已打包的最高 deb —— 不用 Dockerfile 的 ARG，
+          # 那个只代表「本地构建默认用哪个」。
           debs = [m.group(1) for p in glob.glob('115Life_*.deb')
                   if (m := re.match(r'115Life_([0-9.]+)\.deb$', p))]
           if not debs:
-              raise SystemExit('仓库里没有 115Life_*.deb，无法判断当前版本')
+              raise SystemExit('仓库里没有 115Life_*.deb')
           tup = lambda s: tuple(int(x) for x in s.split('.'))
           cur = max(debs, key=tup)
           changed = tup(up) > tup(cur)
@@ -80,83 +88,124 @@ jobs:
               f.write(f'upstream={up}\ncurrent={cur}\nurl={url}\nnotice={notice}\n')
               f.write(f'changed={"true" if changed else "false"}\n')
           print(f'upstream={up}  current={cur}  changed={changed}')
-          print(f'bundled so far: {", ".join(sorted(debs, key=tup))}')
           PYEOF
 
-      # ---- 有新版本：下载、校验、替换 deb、更新 Dockerfile/README、提交 ----
-      - name: Download and commit new deb
-        if: steps.check.outputs.changed == 'true'
+      # ---- 有新版本：下载、校验、替换 deb、更新 Dockerfile、**本地**提交 ----
+      # 这里刻意不 push：镜像还没构建、没冒烟测试。提交与 tag 一起等到
+      # 「Push image」成功之后再推（见 Tag release 步骤），避免出现
+      # tag 有、镜像没有的情况。
+      - name: Download and prepare release commit
+        id: bump
+        if: steps.check.outputs.changed == 'true' && github.event.inputs.dry_run != 'true'
         run: |
           set -euo pipefail
           UP="${{ steps.check.outputs.upstream }}"
-          CUR="${{ steps.check.outputs.current }}"
           URL="${{ steps.check.outputs.url }}"
           NOTICE="${{ steps.check.outputs.notice }}"
+          PREV="${{ steps.check.outputs.current }}"
           echo "downloading $URL"
           curl -fSL --retry 3 --retry-delay 5 -m 900 -o "115Life_${UP}.deb" "$URL"
           V=$(dpkg-deb --field "115Life_${UP}.deb" Version)
-          if [ "$V" != "$UP" ]; then
-            echo "::error::deb Version ($V) 与上游版本 ($UP) 不一致，放弃提交"; exit 1
-          fi
+          [ "$V" = "$UP" ] || { echo "::error::deb Version($V) 与上游($UP) 不一致"; exit 1; }
           SZ=$(stat -c%s "115Life_${UP}.deb")
-          if [ "$SZ" -lt 50000000 ]; then
-            echo "::error::deb 大小异常 (${SZ}B)，放弃提交"; exit 1
-          fi
-          # 旧版本 deb 保留不删：用户要能退回上一版客户端，client-<旧版本> 镜像
-          # 也要能随代码修复重建。Dockerfile 的 ARG 只跟着最新版走（本地构建默认值）。
+          [ "$SZ" -ge 50000000 ] || { echo "::error::deb 大小异常 (${SZ}B)"; exit 1; }
+
           sed -i "s/^ARG LIFE_DEB=115Life_[0-9.]*\.deb/ARG LIFE_DEB=115Life_${UP}.deb/" Dockerfile
-          if grep -q "115Life_${CUR}\.deb" README.md; then
-            sed -i "s/115Life_${CUR}\.deb/115Life_${UP}.deb/g" README.md
-          fi
-          # 只保留最近 KEEP 个版本。deb 一旦进过 git 历史就永久占空间（约 80MB/版），
-          # 不设上限时仓库会以每年数百 MB 膨胀。被裁掉的旧 client-* 镜像已在
-          # registry 里，仍可 pull，只是不能再重建。
+
+          # 下一个发版号 = max(远端最新 tag, Dockerfile 的 ARG APP_VERSION) 的 patch + 1。
+          # 取两者最大值是为了防「上次 tag 推送失败」：那时远端 tag 落后于已经提交的
+          # Dockerfile，只看 tag 会重复发同一个号。
+          # 用 ls-remote 而不是本地 tag —— checkout 默认 depth=1，本地没有 tag，
+          # 而为了读 tag 去全量 fetch 会把带 deb 的历史一起拉下来（几百 MB）。
+          TAG_VER=$(git ls-remote --tags --refs origin 'v*' 2>/dev/null \
+                    | awk -F/ '{print $NF}' | sed 's/^v//' | sort -V | tail -1 || true)
+          FILE_VER=$(sed -n 's/^ARG APP_VERSION=\([0-9][0-9.]*\)$/\1/p' Dockerfile | head -1)
+          LATEST=""
+          for v in "$TAG_VER" "$FILE_VER"; do
+            case "$v" in ''|*[!0-9.]*) continue ;; esac
+            LATEST=$(printf '%s\n%s\n' "$LATEST" "$v" | sed '/^$/d' | sort -V | tail -1)
+          done
+          [ -n "$LATEST" ] || LATEST=1.1.0
+          NEXT=$(python3 - "$LATEST" <<'PY'
+          import sys
+          # 兜底去掉 v/V 前缀：正常路径已在 shell 里 sed 掉，这里防手工改坏
+          parts = [int(x.lstrip('vV')) for x in sys.argv[1].split('.') if x.lstrip('vV').isdigit()]
+          while len(parts) < 3:
+              parts.append(0)
+          parts[2] += 1
+          print('.'.join(str(x) for x in parts))
+          PY
+          )
+          echo "发版号：v${LATEST} -> v${NEXT}"
+          # 让仓库里的默认值跟上发版号（CI 构建时仍会用 --build-arg 覆盖）
+          sed -i "s/^ARG APP_VERSION=.*/ARG APP_VERSION=${NEXT}/" Dockerfile
+
+          # 只保留最近 KEEP 个版本：deb 一旦进过 git 历史就永久占空间（约 80MB/版）。
+          # 更早客户端的镜像已在 registry，仍可 pull，只是不能再重建。
           KEEP=3
           TRIMMED=$(ls -1 115Life_*.deb | sort -V | head -n -${KEEP} || true)
-          if [ -n "$TRIMMED" ]; then
-            echo "$TRIMMED" | xargs -r rm -f
-            echo "超出保留数量($KEEP)已移除：$TRIMMED"
-          fi
-          echo "当前打包的客户端版本："
-          ls -1 115Life_*.deb | sort -V
+          [ -n "$TRIMMED" ] && { echo "$TRIMMED" | xargs -r rm -f; echo "已移除: $TRIMMED"; }
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "没有实际变更，跳过提交"
+            # 没实际变更就不算发版：不输出 version，后续步骤会当日常构建处理，
+            # 免得给一个没有对应提交的版本号打 tag。
+            echo "没有实际变更，按日常构建处理（不发版）"
           else
-            MSG="chore: bump 115Life ${CUR} -> ${UP}"
-            if [ -n "$NOTICE" ]; then MSG="$MSG
+            MSG="chore(release): 115Life ${PREV} -> ${UP} (v${NEXT})"
+            [ -n "$NOTICE" ] && MSG="$MSG
 
-          release notice: ${NOTICE}"; fi
+          release notice: ${NOTICE}"
             git commit -m "$MSG"
-            git push origin HEAD:main || {
-              echo "::warning::push 失败（可能有并发提交），rebase 后重试"
-              git fetch origin main && git rebase origin/main && git push origin HEAD:main
-            }
+            echo "已本地提交：$(git log --oneline -1)"
+            {
+              echo "version=${NEXT}"
+              echo "prev_client=${PREV}"
+              echo "upstream=${UP}"
+              echo "url=${URL}"
+            } >> "$GITHUB_OUTPUT"
           fi
 
-      # ---- 枚举仓库里打包的客户端版本 ----
-      - name: Enumerate bundled client versions
+      # ---- 解析版本号 ----
+      # 三种可能：
+      #   tag 触发        → APP=v 后面的版本号，只推 APP + latest
+      #   检测到 deb 升级 → APP=自动递增的发版号（v1.1.7），按发版处理，
+      #                     同时刷新 main/edge（这条流水线是从 main 发出去的）
+      #   其余（无新版）  → APP=dev-<sha>，只做日常构建
+      - name: Resolve versions
         id: vers
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import glob, os, re
-          vers = [m.group(1) for p in glob.glob('115Life_*.deb')
-                  if (m := re.match(r'115Life_([0-9.]+)\.deb$', p))]
-          if not vers:
-              raise SystemExit('仓库里没有 115Life_*.deb')
+          CLIENT=$(python3 - <<'PY'
+          import glob, re
+          vs = [m.group(1) for p in glob.glob('115Life_*.deb')
+                if (m := re.match(r'115Life_([0-9.]+)\.deb$', p))]
           tup = lambda s: tuple(int(x) for x in s.split('.'))
-          vers.sort(key=tup)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write('list=' + ' '.join(vers) + '\n')
-              f.write('latest=' + vers[-1] + '\n')
-          print('将构建:', ', '.join(vers))
-          print('latest 指向:', vers[-1])
+          print(max(vs, key=tup))
           PY
+          )
+          REF="${{ github.ref_name }}"
+          BUMP="${{ steps.bump.outputs.version }}"
+          if [ "${REF#v}" != "$REF" ]; then
+            APP="${REF#v}"; IS_REL=true; BRANCH_TAGS=false
+            echo "触发=tag  APP_VERSION=${APP}（内置客户端 ${CLIENT}）"
+          elif [ -n "$BUMP" ]; then
+            APP="$BUMP"; IS_REL=true; BRANCH_TAGS=true
+            echo "触发=自动发版  APP_VERSION=${APP}（客户端 ${{ steps.bump.outputs.prev_client }} -> ${CLIENT}）"
+          else
+            APP="dev-$(git rev-parse --short HEAD)"; IS_REL=false; BRANCH_TAGS=true
+            echo "触发=${REF}  APP_VERSION=${APP}（非发版构建，客户端 ${CLIENT}）"
+          fi
+          {
+            echo "app=${APP}"
+            echo "client=${CLIENT}"
+            echo "deb=115Life_${CLIENT}.deb"
+            echo "is_release=${IS_REL}"
+            echo "branch_tags=${BRANCH_TAGS}"
+          } >> "$GITHUB_OUTPUT"
 
-      # ---- ghcr.io（自动使用 GITHUB_TOKEN）----
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
@@ -164,7 +213,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---- Docker Hub（未配置密钥则整步跳过，只发布 ghcr）----
       - name: Log in to Docker Hub
         if: ${{ env.DH_USER != '' && env.DH_TOKEN != '' }}
         uses: docker/login-action@v3
@@ -175,86 +223,203 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ---- 每个客户端版本各构建一个镜像 ----
-      # tag 规则：client-<客户端版本>（永远打）
-      #           最高版本额外 → latest（分支触发再加 main+edge，标签推送再加 <version>）
-      - name: Build and push every bundled client version
-        env:
-          REF_NAME: ${{ github.ref_name }}
+      # ---- 先构建到本地（--load），冒烟测试通过后才推 ----
+      - name: Build image (local, not pushed yet)
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg "LIFE_DEB=${{ steps.vers.outputs.deb }}" \
+            --build-arg "CLIENT_VERSION=${{ steps.vers.outputs.client }}" \
+            --build-arg "APP_VERSION=${{ steps.vers.outputs.app }}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            -t "115nas-smoke:latest" \
+            .
+
+      # ---- 冒烟测试：真跑起来，确认没有静默降级 ----
+      - name: Smoke test
+        run: |
+          set -uo pipefail
+          FAIL=0
+          docker run -d --name smoke -p 16080:6080 -e TZ=Asia/Shanghai "115nas-smoke:latest"
+
+          echo "等待 Web 端口就绪（最多 90s）…"
+          OK=0
+          for i in $(seq 1 45); do
+            if curl -fsS -m 3 -o /dev/null http://127.0.0.1:16080/ 2>/dev/null; then OK=1; break; fi
+            sleep 2
+          done
+          [ "$OK" = "1" ] || { echo "::error::Web 端口 90s 内未就绪"; FAIL=1; }
+
+          # ① 首页必须是 KasmVNC 的客户端，而不是 fallback 的 noVNC 页
+          BODY=$(curl -fsS -m 5 http://127.0.0.1:16080/ 2>/dev/null || true)
+          if echo "$BODY" | grep -qi "kasmvnc"; then
+            echo "OK  首页是 KasmVNC 客户端"
+          else
+            echo "::error::首页不是 KasmVNC 客户端 —— 显示栈可能降级了"; echo "$BODY" | head -c 400; FAIL=1
+          fi
+
+          # ② 诊断页可访问
+          curl -fsS -m 5 -o /dev/null http://127.0.0.1:16080/diag.html \
+            && echo "OK  诊断页 /diag.html" || { echo "::error::诊断页 404"; FAIL=1; }
+
+          # ③ WebSocket 握手必须是 101（绕过反代时，容器内的这一段必须自证可用）
+          WS=$(curl -s -i -m 8 --noproxy '*' \
+                 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+                 -H "Sec-WebSocket-Version: 13" \
+                 -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
+                 http://127.0.0.1:16080/websockify 2>/dev/null | head -n 1)
+          echo "WS: ${WS:-（无响应）}"
+          case "$WS" in *101*) echo "OK  WebSocket 101" ;; *) echo "::error::WebSocket 握手没有返回 101"; FAIL=1 ;; esac
+
+          # ④ 客户端进程活着
+          docker exec smoke pgrep -x Life115 >/dev/null 2>&1 \
+            && echo "OK  Life115 在跑" || { echo "::error::Life115 没起来"; FAIL=1; }
+
+          # ⑤ 容器内自检脚本本身要能跑通
+          docker exec smoke 115nas-diag > /tmp/diag.txt 2>&1 \
+            && echo "OK  115nas-diag 正常" || { echo "::error::115nas-diag 执行失败"; FAIL=1; }
+
+          # ⑥ 图形栈：Avalonia 画界面必须用到的 X 扩展。缺一个就不是「慢」而是
+          #    「起不来 / 收不到输入」，必须在推镜像前拦住，不能等用户报白屏。
+          #    取的是 diag 已算好的结果，避免两处探测逻辑漂移。
+          EXTS=$(awk '/^  X 扩展/{sub(/^ *X 扩展 *: */,""); print}' /tmp/diag.txt 2>/dev/null)
+          echo "X 扩展: ${EXTS:-（读不到）}"
+          if [ -z "$EXTS" ]; then
+            # 读不到 ≠ 缺失。分开报，否则排查方向会被误导到「X server 不支持」。
+            echo "::error::读不到 X 扩展清单（xdpyinfo 失败或 X 没起来）"; FAIL=1
+          else
+            for e in RANDR XInputExtension XTEST; do
+              case " $EXTS " in
+                *" $e "*) echo "OK  X 扩展 $e" ;;
+                *) echo "::error::X server 缺扩展 $e（客户端需要它才能画界面/收输入）"; FAIL=1 ;;
+              esac
+            done
+            case " $EXTS " in
+              *" GLX "*) echo "note: X server 提供了 GLX" ;;
+              *) echo "note: X server 无 GLX（客户端会走软件渲染，属预期）" ;;
+            esac
+          fi
+          if grep -q "GL 供应商库  : 无" /tmp/diag.txt 2>/dev/null; then
+            echo "note: 镜像里没有 mesa GL 供应商库 → Skia 软件渲染（属预期，不是故障）"
+          fi
+
+          # ⑦ 客户端必须真的把窗口画出来。进程活着 ≠ 有画面：渲染后端协商失败
+          #    时进程照跑、日志也不报错，用户看到的就是白屏。这条只能靠窗口判断。
+          #    必须过滤尺寸：openbox 自己有个 1x1 的选窗窗口，不过滤就会假通过。
+          WINS=""
+          for i in $(seq 1 20); do
+            WINS=$(docker exec smoke sh -c 'xwininfo -root -children 2>/dev/null' 2>/dev/null \
+                   | grep -E '^ +0x[0-9a-f]+ ' | grep -E '[0-9]{3,4}x[0-9]{3,4}\+' || true)
+            [ -n "$WINS" ] && break
+            sleep 1
+          done
+          echo "$WINS" | sed 's/^ */  win: /'
+          if [ -n "$WINS" ]; then
+            echo "OK  客户端已创建可见窗口"
+          else
+            echo "::error::20s 内没有可见窗口（进程在但没画出界面，看 /logs/life115.log）"; FAIL=1
+          fi
+
+          echo "===== entrypoint.log ====="
+          docker exec smoke sh -c 'tail -n 40 /logs/entrypoint.log' 2>/dev/null || true
+          echo "===== 115nas-diag ====="
+          cat /tmp/diag.txt 2>/dev/null || true
+
+          docker rm -f smoke >/dev/null 2>&1 || true
+          exit "$FAIL"
+
+      # ---- 测试通过：打标签并推送 ----
+      # dry_run（手动触发的验证构建）只走到冒烟测试为止，不覆盖任何 tag。
+      - name: Push image
+        if: ${{ github.event.inputs.dry_run != 'true' }}
         run: |
           set -euo pipefail
           GHCR="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}"
-          LATEST="${{ steps.vers.outputs.latest }}"
-          # 降序：latest 指向的版本先构建。旧版本万一构建失败，latest 已经发出去，
-          # 不至于让所有人拿不到新镜像。
-          VERS=$(echo "${{ steps.vers.outputs.list }}" | tr ' ' '\n' | sort -Vr)
-          FAILED=""
-          for VER in $VERS; do
-            TAGS="${GHCR}:client-${VER}"
-            if [ "$VER" = "$LATEST" ]; then
-              if [ "${REF_NAME#v}" != "$REF_NAME" ]; then
-                TAGS="${TAGS},${GHCR}:${REF_NAME#v},${GHCR}:latest"
-              else
-                TAGS="${TAGS},${GHCR}:main,${GHCR}:edge,${GHCR}:latest"
-              fi
-            fi
-            if [ -n "${DH_USER:-}" ]; then
-              DH="${DH_USER}/${IMAGE_NAME}"
-              TAGS="${TAGS},${DH}:client-${VER}"
-              if [ "$VER" = "$LATEST" ]; then
-                if [ "${REF_NAME#v}" != "$REF_NAME" ]; then
-                  TAGS="${TAGS},${DH}:${REF_NAME#v},${DH}:latest"
-                else
-                  TAGS="${TAGS},${DH}:main,${DH}:edge,${DH}:latest"
-                fi
-              fi
-            fi
+          APP="${{ steps.vers.outputs.app }}"
+          BRANCH_TAGS="${{ steps.vers.outputs.branch_tags }}"
 
-            IFS=',' read -r -a _tags <<< "$TAGS"
-            TAGARGS=()
-            for t in "${_tags[@]}"; do TAGARGS+=(-t "$t"); done
+          TAGS=("${GHCR}:${APP}")
+          [ -n "${DH_USER:-}" ] && TAGS+=("${DH_USER}/${IMAGE_NAME}:${APP}")
 
-            echo "════════ client ${VER} ════════"
-            printf '  %s\n' "${_tags[@]}"
+          # latest 一律跟随最新构建（tag 发版、自动发版、日常构建都一样）
+          TAGS+=("${GHCR}:latest")
+          [ -n "${DH_USER:-}" ] && TAGS+=("${DH_USER}/${IMAGE_NAME}:latest")
 
-            # cache 不按版本分 scope：apt 那一大段是各版本共用的，复用能省掉
-            # 每次一两分钟的 apt install；deb 之后的层本来也不可能命中。
-            if docker buildx build \
-                 --platform linux/amd64 \
-                 --push \
-                 --build-arg "LIFE_DEB=115Life_${VER}.deb" \
-                 --build-arg "CLIENT_VERSION=${VER}" \
-                 --cache-from type=gha \
-                 --cache-to type=gha,mode=max \
-                 "${TAGARGS[@]}" \
-                 . ; then
-              echo "✓ client ${VER} 已推送"
-            else
-              FAILED="${FAILED} ${VER}"
-              echo "::warning::client ${VER} 构建或推送失败"
-              if [ "$VER" = "$LATEST" ]; then
-                echo "::error::最新客户端 ${VER} 构建失败——latest 指向它，本次发布不完整"
-                exit 1
-              fi
-            fi
-          done
-          if [ -n "$FAILED" ]; then
-            echo "::warning::以下版本未能重建（registry 里已有的旧镜像不受影响）：${FAILED}"
+          # main/edge 只跟「从 main 发出去的构建」；打 tag 发版不覆盖它们，
+          # 否则 tag 指向的提交可能还没进 main。
+          if [ "${BRANCH_TAGS}" = "true" ]; then
+            TAGS+=("${GHCR}:main" "${GHCR}:edge")
+            [ -n "${DH_USER:-}" ] && TAGS+=("${DH_USER}/${IMAGE_NAME}:main" "${DH_USER}/${IMAGE_NAME}:edge")
           fi
 
+          for t in "${TAGS[@]}"; do
+            docker tag "115nas-smoke:latest" "$t"
+            echo "push $t"
+          done
+          # 并行推，最后一个失败会让 set -e 生效
+          printf '%s\n' "${TAGS[@]}" | xargs -P 4 -I{} docker push {}
+          echo "已推送：${TAGS[*]}"
+
+      # ---- 自动发版：推提交 + 打附注 tag + 建 Release ----
+      # 放在镜像推送之后：镜像真的推上去了才让 tag 存在，避免「tag 有、镜像没有」
+      # 这种只能人工补救的状态。同理，提交也直到这一步才 push。
+      - name: Tag release (upstream bump)
+        if: ${{ steps.bump.outputs.version != '' && github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.bump.outputs.version }}"
+          PREV="${{ steps.bump.outputs.prev_client }}"
+          UP="${{ steps.bump.outputs.upstream }}"
+          URL="${{ steps.bump.outputs.url }}"
+          NOTICE="${{ steps.check.outputs.notice }}"
+          REPO="${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}"
+
+          # ① 提交推到 main（并发提交时 rebase 重试）
+          git push origin HEAD:main || {
+            echo "::warning::push 失败（可能有并发提交），rebase 后重试"
+            git fetch origin main && git rebase origin/main && git push origin HEAD:main
+          }
+
+          # ② 附注 tag：说明里必须写明内置的官方 deb 版本，这是「哪个镜像对应
+          #    哪版 115」的唯一权威记录（README 的对照表是人工维护的，会落后）
+          if git rev-parse -q --verify "refs/tags/v${V}" >/dev/null 2>&1; then
+            echo "v${V} 已存在，跳过打 tag"
+            exit 0
+          fi
+          NOTICE_LINE=""
+          [ -n "$NOTICE" ] && NOTICE_LINE="- 官方更新说明：${NOTICE}"$'\n'
+          # 用 printf 而不是 heredoc：NOTICE 为空时不能留下一个空行
+          {
+            printf 'v%s\n\n' "$V"
+            printf '自动发版：检测到 115 官方 Linux 客户端更新。\n\n'
+            printf -- '- 内置 115 客户端：%s -> %s（官方 deb 版本 %s）\n' "$PREV" "$UP" "$UP"
+            printf -- '- 上游 deb：%s\n' "$URL"
+            printf '%s' "$NOTICE_LINE"
+            printf -- '- 镜像：ghcr.io/%s:%s（同时更新 latest、main、edge）\n\n' "$REPO" "$V"
+            printf '上一个版本保持原样，仍可 pull；每个 1.1.x 冻结当时的客户端。\n'
+          } > /tmp/relnotes.md
+          git tag -a "v${V}" -F /tmp/relnotes.md
+          git push origin "refs/tags/v${V}"
+          echo "已推送 tag v${V}"
+
+          # ③ 同步建 GitHub Release（失败不影响镜像，tag 已在那里）
+          gh release create "v${V}" \
+            --title "v${V}（115 客户端 ${UP}）" \
+            --notes-file /tmp/relnotes.md \
+            || echo "::warning::GitHub Release 创建失败；tag v${V} 已推送，可手动补一条 release"
+
       # ---- ghcr 包默认 private，尝试改成 public（失败不阻断）----
-      # 根因（2026-10-18 实测）：GITHUB_TOKEN 是 installation token，PATCH
-      # /user/packages/... 对它返回 404 Not Found——它无法管理用户级包。
-      # 两条路：① 手动改一次（visibility 是持久属性，之后永久保持）；
-      # ② 想要全自动：建一个带 write:packages 权限的 PAT，
-      # 存为仓库 Secret GHCR_PAT，本步会优先使用它。
       - name: Make ghcr package public (best effort)
         continue-on-error: true
         env:
           CR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
           TOKEN="${{ secrets.GITHUB_TOKEN }}"
-          if [ -n "$CR_PAT" ]; then TOKEN="$CR_PAT"; fi
+          [ -n "$CR_PAT" ] && TOKEN="$CR_PAT"
           RESP=$(curl -sS -X PATCH \
             -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -264,13 +429,10 @@ jobs:
           echo "response: $RESP"
           case "$RESP" in
             *200|*201) echo "ghcr 包已设为 public" ;;
-            *) echo "自动设置公开失败——visibility 是持久属性，手动改一次即可：Package settings -> Change visibility -> Public" ;;
+            *) echo "自动设置公开失败——visibility 是持久属性，手动改一次即可" ;;
           esac
 
-      # ---- 同步 Docker Hub 仓库概述（简介 + 完整说明取自 README）----
-      # 没有这一步时，Docker Hub 上的 description / full_description 长期是空的，
-      # 只能靠手工登录后台粘贴。这里用仓库已有的 DOCKERHUB_* Secret 自动同步：
-      # 每次发布都跟着 README.md 走，不会出现文档和仓库页不一致。
+      # ---- 同步 Docker Hub 仓库概述（简介 + README）----
       - name: Sync Docker Hub description
         if: ${{ env.DH_USER != '' && env.DH_TOKEN != '' }}
         continue-on-error: true
@@ -293,68 +455,49 @@ jobs:
               except urllib.error.HTTPError as e:
                   return e.code, e.read().decode('utf-8', 'replace')
 
-          # PAT 可以当作密码登录，换取 JWT
           st, body = call('https://hub.docker.com/v2/users/login',
                           {'username': user, 'password': pat})
           if st != 200:
-              print('login failed', st, body[:300])
-              raise SystemExit(1)
+              print('login failed', st, body[:300]); raise SystemExit(1)
           jwt = json.loads(body)['token']
 
           full = open('README.md', encoding='utf-8').read()
 
-          # 注意：Hub 的这个字段校验的是**字节数**不是字符数（中文一个字 3 字节），
-          # 上限 100 字节。之前按 len() 判字符数，43 个字符 = 151 字节，直接 400。
-          # 只写真正的产品定位：中文输入、剪贴板这些属于基本能力，不当卖点写
-          summary = ('115 生活 Linux 客户端 Docker 版：浏览器打开即用，'
-                     '下载直落 NAS 目录')
+          # Hub 这个字段校验的是**字节数**（中文 3 字节/字），上限 100 字节。
+          summary = '115 生活 Linux 客户端 Docker 版：浏览器打开即用，下载直落 NAS 目录'
 
           def btrim(s, limit=100):
               b = s.encode('utf-8')
-              if len(b) <= limit:
-                  return s
-              return b[:limit - 3].decode('utf-8', 'ignore').rstrip() + '...'
+              return s if len(b) <= limit else b[:limit - 3].decode('utf-8', 'ignore').rstrip() + '...'
 
           summary = btrim(summary)
-
           st, body = call(
               f'https://hub.docker.com/v2/repositories/{user}/{repo}/',
               {'description': summary, 'full_description': full},
               method='PATCH',
               headers={'Authorization': 'JWT ' + jwt, 'Content-Type': 'application/json'})
-          print('PATCH status:', st)
-          print('summary:', summary)
-          print('full_description chars:', len(full))
+          print('PATCH status:', st, '| summary:', summary)
           if st >= 400:
-              print('response:', body[:500])
-              raise SystemExit(1)
+              print('response:', body[:500]); raise SystemExit(1)
           print('Docker Hub 仓库概述已同步')
           PY
 
-      # ---- 本次产出的镜像标签清单（Actions 运行页面直接可见）----
-      # if: always() —— 构建失败时这份清单更有用，能看出哪些版本已经推出去了。
-      - name: Summarize published tags
+      # ---- 运行页摘要 ----
+      - name: Summarize
         if: always()
         run: |
-          VERS="${{ steps.vers.outputs.list }}"
-          LATEST="${{ steps.vers.outputs.latest }}"
-          GHCR="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}"
           {
-            echo "## 本次产出的镜像"
+            echo "## 本次构建"
             echo
-            if [ -z "$VERS" ]; then
-              echo "未能枚举客户端版本（前面的步骤已失败），详见上方日志。"
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 项目版本 | \`${{ steps.vers.outputs.app }}\` |"
+            echo "| 内置 115 客户端 | \`${{ steps.vers.outputs.client }}\` |"
+            echo "| deb | \`${{ steps.vers.outputs.deb }}\` |"
+            TAG="${{ steps.bump.outputs.version }}"
+            if [ -n "$TAG" ]; then
+              echo "| 自动发版 tag | \`v${TAG}\`（说明里含内置 deb 版本） |"
             else
-              echo "| 115 客户端 | 镜像标签 |"
-              echo "| --- | --- |"
-              for VER in $VERS; do
-                if [ "$VER" = "$LATEST" ]; then
-                  echo "| **${VER}** → latest | \`${GHCR}:client-${VER}\`<br>\`${GHCR}:latest\` |"
-                else
-                  echo "| ${VER} | \`${GHCR}:client-${VER}\` |"
-                fi
-              done
-              echo
-              echo "切换或锁定客户端版本：把 compose 里 image 的 tag 换成对应的 \`client-<版本>\`。"
+              echo "| 自动发版 tag | — |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

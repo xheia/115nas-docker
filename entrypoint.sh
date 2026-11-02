@@ -1,712 +1,221 @@
 #!/bin/bash
 ###############################################################################
-# 115nas 容器入口脚本
+# 115nas 容器入口（1.1.6 重构版）
 #
-# 拉起顺序：dbus → Xtigervnc(:99) → openbox → fcitx5(中文输入)
-#            → websockify(6080/6081) → Life115
+# 进程栈：
+#   tini(PID 1) → 本脚本 → Xkasmvnc(X 服务端 + RFB + HTTP + WebSocket 同一进程)
+#                          → openbox → fcitx5 → Life115
+#   KasmVNC 起不来时降级：Xvfb + x11vnc + websockify(noVNC)
 #
-# 环境变量（均有默认值，可用 docker -e 覆盖）：
-#   SCREEN_WIDTH/HEIGHT/DEPTH  虚拟屏幕（默认 1280x800x24）
-#   VNC_FRAME_RATE             VNC 帧率上限（默认 25）。Xtigervnc 默认 60fps，
-#                              它每发一帧都要在本机 CPU 上做 Tight/JPEG 编码，
-#                              而文件管理界面根本用不到 60fps——限帧是这套栈上
-#                              最有效的提速手段。设 0 关闭限制。
-#   NOVNC_QUALITY              noVNC JPEG 画质 0-9（默认 5；官方默认 6）
-#   NOVNC_COMPRESSION          noVNC 压缩级别 0-9（默认 1）。官方文档写明：
-#                              level 1 消耗最少 CPU，高等级只用于极慢网络。
-#                              局域网里调高等于让 NAS 白烧 CPU 换用不上的带宽。
-#   VNC_PORT                   VNC 监听端口（默认 5900）
-#   VNC_BIND                   VNC 监听地址（默认 127.0.0.1，只允许容器内 noVNC 连接）。
-#                              设为 0.0.0.0 才会对外暴露 5900——仅用于原生 VNC
-#                              客户端直连，必须同时设密码
-#   HTTP_PORT / HTTPS_PORT     noVNC 对外端口（默认 6080 / 6081）
-#   VNC_PASSWORD               可选；设置后 noVNC 连接需输入密码
-#   HTTPS_CERT                 HTTPS 证书（PEM，证书+私钥合一），默认 /certs/server.pem
-#   WS_PATH                    可选；反代改写路径时指定 noVNC 的 WebSocket 端点
-#                              （如 115nas/websockify），默认 websockify
-#   WS_VERBOSE                 可选；非空则 websockify 打印每个请求（排查反代用）
-#   HIDE_SYSTEM_PATHS          默认 1：文件选择器侧栏钉上常用目录书签（第 6.5 节）
-#   GTK_BOOKMARKS              默认 "/root/Downloads=115 下载目录|/media/nas=NAS 共享目录"
-#                              钉在文件选择器侧栏顶部的书签，| 分隔，路径=显示名
-#   LIFE_STOP_TIMEOUT          停止容器时等客户端自己退出的秒数（默认 8）。
-#                              客户端要把传输队列与任务状态写回本地库；直接 SIGKILL
-#                              会让库停在旧快照，重启后上传列表里已完成的任务又冒出来。
+# 与 1.1.5 的区别（为什么重构）：
+#   1. 三个进程合一 —— 少一次 websockify 转发、少两处需要守活的 pid。
+#   2. 编码换成 WebP/JPEG 自适应 + 多线程，比 noVNC 的固定 Tight 画质省 CPU。
+#   3. 入口不再做「先探测一次 WS 再进客户端」的双握手，首页就是客户端本体；
+#      需要排障时开 /diag.html（静态页，不走启动路径）。
+#   4. 启动并行化 + 去掉 fcitx5 的 sleep 1，首屏更快。
+#   5. tini 做 PID 1，孤儿进程有人 reap，停止时信号也能正确分发。
 #
-# 日志统一写 /logs/（建议挂卷持久化）：
-#   entrypoint.log / xvnc.log / openbox.log / fcitx5.log / x11vnc.log /
-#   websockify.log / websockify-ssl.log / life115.log
+# 环境变量（均有默认值）：
+#   SCREEN_WIDTH/HEIGHT/DEPTH  虚拟屏（默认 1280x800x24）
+#   HTTP_PORT                  Web + WebSocket 端口（默认 6080）
+#   VNC_PORT                   RFB 端口（默认 5900，只绑回环）
+#   VNC_BIND                   RFB 绑定地址（默认 127.0.0.1；改 0.0.0.0 必须配口令）
+#   VNC_PASSWORD               可选；设置后浏览器里会出现登录框
+#   VNC_FRAME_RATE             帧率上限（默认 25；0 = 不限）
+#   VNC_QUALITY_MIN/MAX        动态画质区间（默认 3 / 7）
+#   VNC_WEBP_TIME              WebP 编码耗时预算（默认 5，越大越清晰越费 CPU）
+#   VNC_TLS_CERT               可选；挂载 PEM（证书+私钥合一）后端口改走 HTTPS/WSS
+#   DISPLAY_MODE               auto | kasmvnc | fallback（默认 auto）
+#   HIDE_SYSTEM_PATHS          默认 1：文件选择器侧栏钉常用目录书签
+#   GTK_BOOKMARKS              书签列表，| 分隔，路径=显示名
+#   LIFE_STOP_TIMEOUT          停止容器时等客户端自己退出的秒数（默认 8）
+#   UMASK                      新落盘文件的权限掩码（默认 022；000 = 任何 uid 可读写）
+#
+# 日志：/logs/entrypoint.log（总）、xkasmvnc.log、openbox.log、fcitx5.log、
+#       life115.log、websockify.log（仅降级模式）、xvfb.log / x11vnc.log
 ###############################################################################
 set -u
 
-LOG_DIR=/logs
-mkdir -p "$LOG_DIR" /config /appdata /cache 2>/dev/null
+APP_DIR=${APP_DIR:-/usr/local/share/115nas}
+# shellcheck source=/dev/null
+. "$APP_DIR/lib/common.sh"
+# shellcheck source=/dev/null
+. "$APP_DIR/lib/display.sh"
+# shellcheck source=/dev/null
+. "$APP_DIR/lib/desktop.sh"
+# shellcheck source=/dev/null
+. "$APP_DIR/lib/diag.sh"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_DIR/entrypoint.log"; echo "[115nas] $*"; }
-
-DISPLAY_NUM=99
-export DISPLAY=":${DISPLAY_NUM}"
-W=${SCREEN_WIDTH:-1280}
-H=${SCREEN_HEIGHT:-800}
-D=${SCREEN_DEPTH:-24}
-VNC_PORT=${VNC_PORT:-5900}
-# 只允许回环：VNC 协议本身没有账号体系（RFB 密码只是弱共享口令），
-# 暴露到容器外就意味着任何能连到 5900 的人都能操作 115 账号。
-VNC_BIND=${VNC_BIND:-127.0.0.1}
-HTTP_PORT=${HTTP_PORT:-6080}
-HTTPS_PORT=${HTTPS_PORT:-6081}
-VNC_PASSWORD=${VNC_PASSWORD:-}
-# 性能三件套（见文件头说明）。这三项直接决定 NAS 的 CPU 占用：
-#   FrameRate   60 -> 25 约砍掉 2/3 的帧编码量
-#   compression 3  -> 1  约让 Tight 的 zlib 开销减半
-VNC_FRAME_RATE=${VNC_FRAME_RATE:-25}
-NOVNC_QUALITY=${NOVNC_QUALITY:-5}
-NOVNC_COMPRESSION=${NOVNC_COMPRESSION:-1}
-# 停止容器时留给客户端自己退出的时间。它要把传输队列写回本地库，
-# 硬杀之后重启，上传列表会从库里的旧快照恢复（已完成的任务又冒出来）。
-LIFE_STOP_TIMEOUT=${LIFE_STOP_TIMEOUT:-8}
-LIFE_PID_FILE=/tmp/115nas-life115.pid
-HTTPS_CERT=${HTTPS_CERT:-/certs/server.pem}
-NOVNC_WEB=/usr/share/novnc
-VNC_PASS_FILE=/tmp/115nas-vnc.pass
-XVNC_PID=""
-
-XVFB_PID=""; OB_PID=""; VNC_PID=""; WS_PID=""; WSS_PID=""; LIFE_PID=""
-
-# kill -0 对**僵尸进程**同样返回成功（进程已经退出、只是还没被 reap），而容器的
-# PID 1 就是这个脚本、不会去 reap 孤儿，所以直接拿 kill -0 判活会永远得到「还活着」，
-# 每次停止都白等满 LIFE_STOP_TIMEOUT。必须看 /proc/<pid>/stat 的状态位。
-life_alive() {
-    local p="${1:-}" st=""
-    [ -n "$p" ] || return 1
-    kill -0 "$p" 2>/dev/null || return 1
-    if [ -r "/proc/$p/stat" ]; then
-        st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
-        [ "$st" != "Z" ] || return 1
-    fi
-    return 0
+T0=$(date +%s%3N 2>/dev/null || echo 0)
+since() {
+    local now; now=$(date +%s%3N 2>/dev/null || echo 0)
+    [ "$T0" = "0" ] && { echo "?"; return; }
+    echo "$((now - T0))"
 }
 
 cleanup() {
-    log "entrypoint: received stop signal, shutting down..."
+    log "收到停止信号，开始退出..."
 
-    # ① 先掐掉重启循环。否则下面把客户端停掉，循环会立刻把它重新拉起来。
-    #    TERM 之后还得 KILL：bash 在等前台子进程时会把信号压到子进程结束才处理，
-    #    而它等的正是 Life115——那就成了死等。
-    if [ -n "$LIFE_PID" ] && kill -0 "$LIFE_PID" 2>/dev/null; then
+    # ① 先掐掉重启循环，否则下面停掉客户端它立刻又拉起来。
+    if proc_alive "$LIFE_PID"; then
         kill -TERM "$LIFE_PID" 2>/dev/null
-        sleep 1
+        sleep 1   # bash 等前台子进程时会把信号压后处理，补一刀 KILL 兜底
         kill -KILL "$LIFE_PID" 2>/dev/null
     fi
 
-    # ② 让 Life115 自己退出，而不是被 SIGKILL 拔电源。它退出时会把传输队列和
-    #    任务状态写回 /appdata 里的本地库；不写回去，下次启动只能从旧快照恢复，
-    #    表现就是上传列表里已完成的任务又冒出来、或者任务停在中间态。
+    # ② 让 Life115 自己退出。它退出时会把传输队列和任务状态写回 /appdata 的
+    #    本地库；直接 SIGKILL 会让列表停在旧快照，重启后已完成的任务又冒出来。
     local lp="" i=0
     [ -f "$LIFE_PID_FILE" ] && lp=$(cat "$LIFE_PID_FILE" 2>/dev/null || true)
-    if life_alive "$lp"; then
-        log "entrypoint: asking Life115 (pid $lp) to exit, waiting up to ${LIFE_STOP_TIMEOUT}s"
+    if proc_alive "$lp"; then
+        log "请 Life115(pid $lp) 退出，最多等 ${LIFE_STOP_TIMEOUT}s"
         kill -TERM "$lp" 2>/dev/null
-        while [ "$i" -lt "$LIFE_STOP_TIMEOUT" ] && life_alive "$lp"; do
+        while [ "$i" -lt "$LIFE_STOP_TIMEOUT" ] && proc_alive "$lp"; do
             sleep 1
             i=$((i + 1))
         done
-        if life_alive "$lp"; then
-            log "entrypoint: WARNING Life115 still alive after ${LIFE_STOP_TIMEOUT}s, killing it (transfer state may not be flushed)"
+        if proc_alive "$lp"; then
+            warn "Life115 在 ${LIFE_STOP_TIMEOUT}s 内没退出，强行杀掉（传输状态可能没落盘）"
             kill -KILL "$lp" 2>/dev/null
         else
-            log "entrypoint: Life115 exited cleanly after ${i}s (transfer state flushed)"
+            log "Life115 已自行退出（用时 ${i}s，传输状态已落盘）"
         fi
     fi
 
     # ③ 其余进程没有状态要落盘，直接 TERM
-    for P in "$WSS_PID" "$WS_PID" "$VNC_PID" "$XVNC_PID" "$OB_PID" "$XVFB_PID"; do
-        [ -n "$P" ] && kill "$P" 2>/dev/null
+    local p
+    for p in "$WS_PID" "$X11VNC_PID" "$XVNC_PID" "$XVFB_PID" "$OB_PID"; do
+        [ -n "$p" ] && kill "$p" 2>/dev/null
     done
-    # VNC 密码临时文件
-    rm -f "$VNC_PASS_FILE" 2>/dev/null
+    pkill -x fcitx5 2>/dev/null
+    rm -f /tmp/115nas-rfb.pass /tmp/115nas-tls-cert.pem /tmp/115nas-tls-key.pem 2>/dev/null
     exit 0
 }
 trap cleanup TERM INT
 
-# --------------------------------------------- 0. 设备标识持久化（风控）
-# 115 客户端会采集主机标识。容器里有两处每次重建都会变：
-#   ① /etc/machine-id —— 由下面的 dbus-uuidgen 生成，写在 overlay 层，
-#      `docker compose up -d` 重建容器就重新生成；
-#   ② hostname —— compose 不写 hostname: 时它就是容器 ID。
-# 而 latest 镜像每周跟随官方版本，一有新 deb 就要重建，于是设备标识跟着变。
-# 在 115 侧看就是「又来了一台新设备在新环境登录」——短时间内反复出现，
-# 足以触发异地登录风控（用户 2026-10-21 收到的正是这类提示）。
-# 处理：首份 machine-id 落到持久卷 /config，之后每次启动恢复原值。
-# hostname 由 compose 的 hostname: 固定，见 docker-compose.yml。
+# ------------------------------------------------- 0. 设备标识持久化（账号风控）
+# 115 客户端会采集主机标识。容器里两处每次重建都会变：/etc/machine-id（写在
+# overlay 层）和 hostname（compose 不写 hostname: 时就是容器 ID）。而镜像跟着
+# 官方客户端更新，一重建设备标识就变，在 115 侧看就是「又来了一台新设备在新环境
+# 登录」，足以触发异地登录风控。首份 machine-id 落到 /config 卷，之后每次恢复。
 persist_machine_id() {
     local store=/config/machine-id
     mkdir -p /config 2>/dev/null
-
-    # 卷里已有值：覆盖回去，容器就恢复了原来的身份，重建多少次都不变
     if [ -s "$store" ]; then
         if cp -f "$store" /etc/machine-id 2>/dev/null; then
-            log "machine-id restored from volume ($(cut -c1-8 "$store")...)"
+            log "machine-id 已从卷恢复（$(cut -c1-8 "$store")...），重建容器不改身份"
         else
-            log "WARNING: /etc/machine-id not writable; identity will drift on rebuild"
+            warn "/etc/machine-id 不可写，重建容器会导致设备标识漂移"
         fi
         return
     fi
-
-    # 首次启动：确保 /etc/machine-id 有值，再存进卷
     if [ ! -s /etc/machine-id ]; then
         { dbus-uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-'; } \
             > /etc/machine-id 2>/dev/null
     fi
-    # 只有确实拿到非空值才落盘——否则会存一个空文件，下次启动误判成
-    # 「已持久化」，反而把新生成的 id 又覆盖掉，等于没修。
+    # 必须拿到非空值才落盘，否则会存一个空文件，下次启动误判成「已持久化」
     if [ -s /etc/machine-id ] && cp -f /etc/machine-id "$store" 2>/dev/null; then
-        log "machine-id seeded to volume ($(cut -c1-8 "$store")...); it now survives container rebuilds"
+        log "machine-id 已播种到卷（$(cut -c1-8 "$store")...）"
     else
-        log "WARNING: could not persist machine-id to $store (check the /config volume)"
+        warn "machine-id 落盘失败，检查 /config 卷"
     fi
 }
 persist_machine_id
 
 # ---------------------------------------------------------------- 1. dbus
-# libsecret（保存登录态）、GTK、WebKit、libnotify 都会用到 dbus。
+# libsecret、GTK、WebKit、libnotify 都要用。
+#
+# 判活看进程而不是 socket：/run 在 debian-slim 里是 overlay 上的普通目录
+# （Docker 不给它挂 tmpfs），docker restart 会保留上次留下的
+# /run/dbus/system_bus_socket 死文件，用 -S 判活会误判「已在运行」而根本不启动。
 mkdir -p /run/dbus
 dbus-uuidgen --ensure >/dev/null 2>&1
-if [ ! -S /run/dbus/system_bus_socket ]; then
+if pgrep -x dbus-daemon >/dev/null 2>&1; then
+    log "dbus system bus 已在运行"
+else
+    rm -f /run/dbus/system_bus_socket 2>/dev/null
     if dbus-daemon --system --fork >"$LOG_DIR/dbus.log" 2>&1; then
-        log "dbus system bus started"
+        log "dbus system bus 已启动"
     else
-        log "WARNING: dbus-daemon --fork failed, retrying with --nofork"
+        warn "dbus-daemon --fork 失败，改用 --nofork"
         dbus-daemon --system --nofork >>"$LOG_DIR/dbus.log" 2>&1 &
     fi
-else
-    log "dbus system bus already running"
 fi
 
-# 会话总线（dbus-launch 来自 dbus-x11）：WebKitGTK 的密码保存、GTK 设置、
-# fcitx5 都需要。缺失不影响二维码登录（登录态主要靠 WebKit Cookie）。
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax)" >/dev/null 2>&1
     export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
-    log "dbus session bus: ${DBUS_SESSION_BUS_ADDRESS:-none}"
+    log "dbus session bus 已就绪"
 fi
 
-# ------------------------------------------------- 2. 虚拟屏 + VNC 服务端
-# 首选 Xtigervnc（TigerVNC）：虚拟屏与 VNC 服务端二合一，且支持 RFB 的
-# Extended Clipboard 伪编码（0xC0A1E5CE），剪贴板按 UTF-8 传输，中文不乱码。
-#
-# 为什么不再首选 x11vnc：x11vnc 0.9.16 未实现该扩展，noVNC 只能退回标准
-# ClientCutText（RFC 6143 §7.5.6，仅 ISO-8859-1），且其实现为
-# data[i] = text.charCodeAt(i)，非 Latin-1 字符被截断到低 8 位 → 中文必然乱码。
-# （上游 issue LibVNC/x11vnc#77，2020 年至今未解决）
-#
-# x11vnc + Xvfb 仍保留在镜像中作为回退：若 TigerVNC 起不来，自动降级，
-# 保证容器仍然可用（代价是剪贴板退回 Latin-1，日志会明确告警）。
-rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null
+# ------------------------------------------------- 2. 显示栈 + 3. 桌面会话
+start_display
+log "显示栈已就绪（backend=$DISPLAY_BACKEND，${W}x${H}x${D}），用时 $(since)ms"
 
-# VNC 绑定地址：默认只监听回环（noVNC 从 127.0.0.1 连进来就够了）。
-# 只有显式 VNC_BIND=0.0.0.0 才放开，并且强制要求密码——RFB 口令是弱共享口令、
-# 可被暴力破解，裸暴露 5900 等于把 115 账号交给扫端口的机器人。
-LOCAL_FLAG="-localhost"
-if [ "$VNC_BIND" != "127.0.0.1" ]; then
-    if [ -z "$VNC_PASSWORD" ]; then
-        log "FATAL: VNC_BIND=$VNC_BIND 会把 VNC($VNC_PORT) 暴露到容器外，但 VNC_PASSWORD 为空。"
-        log "       无密码的 VNC = 谁连上谁就能操作你的 115 账号。请先设置 VNC_PASSWORD 再重启。"
-        exit 1
-    fi
-    LOCAL_FLAG=""
-    log "WARNING: VNC bound to $VNC_BIND (reachable outside the container); keep it behind a tunnel/VPN"
-fi
+# 先把「这台机器的图形能力」记进日志。115Life 是 Avalonia 自己画的界面，
+# 拿不到 GL 就走软件渲染——这属于预期，但必须留痕，否则界面一卡就会被
+# 当成 VNC 编码太慢，白折腾编码参数。
+detect_graphics
+log "图形能力 : ${GRAPHICS_RENDER}"
 
-VNC_MODE=""
-FPS_EFFECTIVE=60   # Xtigervnc 的默认值；探测成功才改成 VNC_FRAME_RATE
+start_wm
+seed_font_cache
+start_ime
+setup_bookmarks
+install_diag_page
+log "桌面会话准备完毕，用时 $(since)ms"
 
-wait_vnc_port() {
-    local i
-    for i in $(seq 1 60); do
-        (echo > "/dev/tcp/127.0.0.1/$VNC_PORT") 2>/dev/null && return 0
-        sleep 0.5
-    done
-    return 1
-}
-
-start_tigervnc() {
-    local sec="None" pw=""
-    # 帧率上限：Xvnc 每发一帧都要在本机 CPU 上做 Tight/JPEG 编码，而它默认
-    # -FrameRate=60，对文件管理界面是纯浪费。
-    #
-    # 探测方式：**不要用 `Xtigervnc -help`**。-FrameRate 属于 TigerVNC 的
-    # "parameter" 段（和 -geometry / -depth 这类 core option 不同），-help 打印的
-    # 是 X server 的核心用法，不含参数段——实测 Debian 12 / TigerVNC 1.12 上
-    # grep -help 是空手而归，但参数明明是支持的（man Xvnc 有），于是白白退化成
-    # 60fps 还打一条误导性的 WARNING。改成在二进制里找选项字符串，这才是
-    # Xvnc 参数表的真实内容。
-    #
-    # 匹配串**不带前导短横**：ddxProcessArgument() 是 vncSetParam(&argv[i][1], ...)，
-    # 先把 '-' 剥掉再查表，所以二进制里存的是 "FrameRate"；只有 Configuration::list()
-    # 打印时才在后面补 "%s -"。搜 "-FrameRate" 一样是空手（v1.1.4 之前就栽在这）。
-    local fps_flag=""
-    if [ "${VNC_FRAME_RATE}" != "0" ]; then
-        local xt_bin
-        xt_bin=$(command -v Xtigervnc 2>/dev/null || true)
-        if [ -n "$xt_bin" ] && grep -qa -- "FrameRate" "$xt_bin" 2>/dev/null; then
-            fps_flag="-FrameRate ${VNC_FRAME_RATE}"
-            FPS_EFFECTIVE=$VNC_FRAME_RATE
-        fi
-    fi
-    if [ -n "$VNC_PASSWORD" ]; then
-        rm -f "$VNC_PASS_FILE"
-        # -f = filter mode：stdin 读明文口令，stdout 输出加密后的口令文件
-        # tigervncpasswd 来自 tigervnc-tools，缺了它整个认证就没了——此时必须
-        # 拒绝启动，而不是“降级为无密码”：那样等于把 115 账号裸挂到公网上，
-        # 而用户从界面上看不出任何区别（这正是踩过的坑）。
-        if command -v tigervncpasswd >/dev/null 2>&1 \
-           && printf '%s\n' "$VNC_PASSWORD" | tigervncpasswd -f > "$VNC_PASS_FILE" 2>/dev/null \
-           && [ -s "$VNC_PASS_FILE" ]; then
-            sec="VncAuth"; pw="-PasswordFile $VNC_PASS_FILE"
-            log "VNC password authentication enabled (RFB VncAuth)"
-        else
-            log "FATAL: VNC_PASSWORD is set but the password could not be stored"
-            log "       (tigervncpasswd missing or failed). Refusing to start without"
-            log "       authentication, because the UI would look identical while the"
-            log "       session is actually open to anyone. Check: tigervncpasswd in PATH?"
-            exit 1
-        fi
-    else
-        log "WARNING: no VNC_PASSWORD - the VNC session is unauthenticated"
-    fi
-    # shellcheck disable=SC2086
-    Xtigervnc ":$DISPLAY_NUM" \
-        -geometry "${W}x${H}" -depth "$D" \
-        -rfbport "$VNC_PORT" \
-        $LOCAL_FLAG \
-        -SecurityTypes "$sec" $pw \
-        -AlwaysShared -ac -desktop 115nas $fps_flag \
-        >"$LOG_DIR/xvnc.log" 2>&1 &
-    XVNC_PID=$!
-    if wait_vnc_port; then
-        VNC_MODE="tigervnc"
-        log "Xtigervnc listening on $VNC_BIND:$VNC_PORT (pid $XVNC_PID)"
-        if [ -n "$fps_flag" ]; then
-            log "  frame rate capped at ${VNC_FRAME_RATE}fps (was 60 by default)"
-        else
-            log "  WARNING: this Xtigervnc has no -FrameRate; running at the default 60fps"
-            log "           (set VNC_FRAME_RATE=0 to silence, or rebuild on a newer tigervnc)"
-        fi
-        return 0
-    fi
-    kill "$XVNC_PID" 2>/dev/null
-    return 1
-}
-
-start_x11vnc() {
-    log "WARNING: Xvfb+x11vnc fallback in use; clipboard is ISO-8859-1 (CJK garbles)"
-    rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null
-    Xvfb "$DISPLAY" -screen 0 "${W}x${H}x${D}" -ac \
-         +extension GLX +extension RANDR +render -noreset \
-         >"$LOG_DIR/xvfb.log" 2>&1 &
-    XVFB_PID=$!
-    local i
-    for i in $(seq 1 60); do
-        xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
-        sleep 0.5
-    done
-    VNC_ARGS="-display $DISPLAY -rfbport $VNC_PORT $LOCAL_FLAG -forever -shared -xkb -quiet -o $LOG_DIR/x11vnc.log"
-    if [ -n "$VNC_PASSWORD" ]; then
-        if x11vnc -storepasswd "$VNC_PASSWORD" "$VNC_PASS_FILE" >/dev/null 2>&1; then
-            VNC_ARGS="$VNC_ARGS -rfbauth $VNC_PASS_FILE"
-            log "x11vnc: password authentication enabled"
-        else
-            log "FATAL: VNC_PASSWORD is set but x11vnc -storepasswd failed; refusing to"
-            log "       start unauthenticated (see the tigervnc branch for the rationale)"
-            exit 1
-        fi
-    else
-        VNC_ARGS="$VNC_ARGS -nopw"
-        log "WARNING: no VNC_PASSWORD - the VNC session is unauthenticated"
-    fi
-    # shellcheck disable=SC2086
-    x11vnc $VNC_ARGS &
-    VNC_PID=$!
-    if wait_vnc_port; then
-        VNC_MODE="x11vnc"
-        FPS_EFFECTIVE=0   # x11vnc 没有 -FrameRate，别在收尾日志里冒充已限帧
-        log "x11vnc listening on $VNC_BIND:$VNC_PORT (pid $VNC_PID)"
-        return 0
-    fi
-    return 1
-}
-
-if command -v Xtigervnc >/dev/null 2>&1; then
-    start_tigervnc || start_x11vnc
-else
-    start_x11vnc
-fi
-
-if [ -z "$VNC_MODE" ]; then
-    log "FATAL: no VNC server could listen on 127.0.0.1:$VNC_PORT; see $LOG_DIR/"
-    tail -n 20 "$LOG_DIR/xvnc.log" "$LOG_DIR/xvfb.log" "$LOG_DIR/x11vnc.log" 2>/dev/null
-    exit 1
-fi
-log "display ready (mode=$VNC_MODE, ${W}x${H}x${D})"
-
-# ---------------------------------------------------------------- 3. openbox
-# 窗口管理器：客户端需要 WM 才能正常获得焦点/拖动/最大化。
-openbox >"$LOG_DIR/openbox.log" 2>&1 &
-OB_PID=$!
-log "openbox started (pid $OB_PID)"
-
-# ------------------------------------------------- 3.5 字体缓存预热
-# $XDG_CACHE_HOME=/cache 是挂卷，首次启动时是空的。镜像里装了 Noto CJK
-# （十个字体文件、约 200MB），fc-cache 冷扫描在 NAS 这种 CPU 上要好几秒，
-# 表现为「窗口已经出来，但文字要迟一会儿才显示」。构建时已把缓存算好放在
-# /opt/fontconfig-cache，这里只在缓存目录还不存在时复制一次（之后由卷留存）。
-if [ -d /opt/fontconfig-cache ] && [ ! -d "${XDG_CACHE_HOME:-/cache}/fontconfig" ]; then
-    mkdir -p "${XDG_CACHE_HOME:-/cache}" 2>/dev/null
-    if cp -a /opt/fontconfig-cache "${XDG_CACHE_HOME:-/cache}/fontconfig" 2>/dev/null; then
-        log "fontconfig cache seeded from image (skips the first-run font scan)"
-    fi
-fi
-
-# ---------------------------------------------------------------- 4. fcitx5 中文输入
-# 容器内跑 fcitx5 拼音输入法：noVNC 窗口里按 Ctrl+Space 呼出，拼音候选项
-# 显示在虚拟屏上（VNC 可见），数字键选字。失败不影响启动——随时可以用
-# 「电脑复制 → Ctrl+V 粘贴」输入中文。
-export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
-mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
-chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
-if command -v fcitx5 >/dev/null 2>&1; then
-    fcitx5 -d >"$LOG_DIR/fcitx5.log" 2>&1
-    sleep 1
-    if pgrep -x fcitx5 >/dev/null 2>&1; then
-        log "fcitx5 started (Ctrl+Space toggles Chinese input)"
-    else
-        log "fcitx5 failed to start; use copy-paste (Ctrl+V) for Chinese"
-    fi
-else
-    log "fcitx5 not installed; use copy-paste (Ctrl+V) for Chinese input"
-fi
-
-# ---------------------------------------------------------------- 5. websockify
-# noVNC 静态页 + WebSocket→RFB 桥。不带 --cert 即纯 HTTP。
-#
-# --heartbeat：定期向客户端发 ping。放在反向代理后面时，很多反代会按空闲时间
-# 掐断 WebSocket（nginx 默认 60s read timeout），表现为画面用着用着突然
-#「无法连接到服务器」。部分老版本 websockify 没有该参数，先探测再启用。
-WS_EXTRA=""
-if websockify --help 2>&1 | grep -q -- "--heartbeat"; then
-    WS_EXTRA="--heartbeat 30"
-fi
-# WS_VERBOSE=1：把每个 HTTP 请求/WebSocket 连接打进容器日志。排查反代是否把
-# 握手转发进来时很有用：看到 "GET /websockify ... 404" 说明 Upgrade 头被中间层
-# 丢了；看到 "WebSocket connection" 说明握手已到容器，问题在别处。
-if [ -n "${WS_VERBOSE:-}" ]; then
-    WS_EXTRA="$WS_EXTRA --verbose"
-fi
-# shellcheck disable=SC2086
-websockify --web "$NOVNC_WEB" $WS_EXTRA "$HTTP_PORT" "127.0.0.1:$VNC_PORT" \
-    >"$LOG_DIR/websockify.log" 2>&1 &
-WS_PID=$!
-log "noVNC (HTTP) on :$HTTP_PORT (pid $WS_PID)${WS_EXTRA:+, args:$WS_EXTRA}"
-
-# HTTPS：仅当挂载了证书（把宿主机的 PEM 证书+私钥合一文件放到 /certs/server.pem）。
-if [ -f "$HTTPS_CERT" ] \
-   && grep -q "BEGIN CERTIFICATE" "$HTTPS_CERT" 2>/dev/null \
-   && grep -q "PRIVATE KEY" "$HTTPS_CERT" 2>/dev/null; then
-    # shellcheck disable=SC2086
-    websockify --web "$NOVNC_WEB" $WS_EXTRA --cert "$HTTPS_CERT" --ssl-only \
-        "$HTTPS_PORT" "127.0.0.1:$VNC_PORT" \
-        >"$LOG_DIR/websockify-ssl.log" 2>&1 &
-    WSS_PID=$!
-    log "noVNC (HTTPS) on :$HTTPS_PORT (pid $WSS_PID)"
-else
-    log "noVNC HTTPS listener skipped (no usable cert at $HTTPS_CERT)"
-fi
-
-# ---------------------------------------------------------------- 6. 生成入口页
-# 生成的 / 首页做两件事：
-#   ① 用一次真实的 WebSocket 握手做探测——通了才跳 noVNC，不通就直接列出原因；
-#   ② 带上自动连接参数跳 vnc.html。
-#
-# 为什么值得先探测：noVNC 未连接时会把剪贴板、Ctrl/Alt、断开等按钮**整体隐藏**
-# （app/styles/base.css 的 :root:not(.noVNC_connected) #noVNC_clipboard_button 等规则），
-# 侧栏只剩「全屏 + 设置」两个按钮。这种画面极易被误判成「按钮丢了」，
-# 实际含义是「这个会话根本没有连上」——先探测就能把这句话直接说出来。
-#
-# WS_PATH：反代改写了路径（例如额外加了 /115nas/ 前缀）时用它指定 noVNC 的 WS 端点。
-gen_index() {
-    # 画质/压缩从环境变量取（默认 5 / 1）。noVNC 文档写明 compression 的
-    # level 1 消耗最少 CPU、高等级只用于极慢网络——这里跑在局域网，把级别
-    # 调高只会让 NAS 的 CPU 白烧，换来的带宽根本用不上。
-    local qs="autoconnect=1&resize=scale&quality=${NOVNC_QUALITY}&compression=${NOVNC_COMPRESSION}&reconnect=1&reconnect_delay=3000&show_dot=1"
-
-    # 默认**不**把密码写进 URL：地址栏、浏览器历史、反代访问日志都会留下它。
-    # 不带 password 参数时，noVNC 收到 RFB 的 credentialsrequired 会自己弹密码框
-    # （ui.js 里 sendCredentials 那段），安全得多，只多一次输入。
-    # 想免输密码自动登录：设 VNC_PASSWORD_AUTOLOGIN=1，代价是口令出现在 URL 里。
-    local auto_pw=""
-    if [ -n "${VNC_PASSWORD_AUTOLOGIN:-}" ] && [ -n "$VNC_PASSWORD" ]; then
-        auto_pw="$VNC_PASSWORD"
-    fi
-
-    cat > "$NOVNC_WEB/index.html" <<'HTMLEOF'
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>115 生活</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-         background:#f5f6f8; color:#1f2328; padding:20px;
-         font-family:"Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif; }
-  .card { width:min(94vw,700px); background:#fff; border:1px solid #e3e6ea; border-radius:12px;
-          padding:22px 24px; box-shadow:0 6px 24px rgba(0,0,0,.06); }
-  h1 { margin:0 0 2px; font-size:18px; }
-  .sub { margin:0 0 16px; font-size:12px; color:#8a9199; }
-  p { margin:10px 0; font-size:14px; line-height:1.6; }
-  #msg { font-weight:600; }
-  .mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; color:#57606a;
-          background:#f6f8fa; border:1px solid #eaeef2; border-radius:6px; padding:8px 10px;
-          word-break:break-all; font-weight:400; }
-  .bad { color:#b42318; }
-  .ok { color:#0f7b0f; }
-  button { font:inherit; font-size:13px; padding:7px 14px; margin:10px 8px 0 0; cursor:pointer;
-           border:1px solid #d0d7de; border-radius:8px; background:#f6f8fa; }
-  button.primary { background:#0969da; border-color:#0969da; color:#fff; }
-  .hide { display:none; }
-  ul { margin:14px 0 0; padding-left:20px; font-size:13px; line-height:1.8; color:#3b4249; }
-  li { margin-bottom:7px; }
-  code { font-family:ui-monospace,Consolas,monospace; font-size:12px; background:#f6f8fa;
-         border:1px solid #eaeef2; border-radius:4px; padding:1px 5px; color:#0a3069; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>115 生活</h1>
-  <p class="sub">先确认到 VNC 的 WebSocket 通道，再进入桌面</p>
-  <p id="msg">检测中…</p>
-  <p id="url" class="mono"></p>
-  <div id="actions" class="hide">
-    <button class="primary" onclick="location.reload()">重新检测</button>
-    <button onclick="location.replace('vnc.html?' + QS)">仍然进入 noVNC</button>
-  </div>
-  <ul id="hints" class="hide">
-    <li>能看到这个页面 = <b>HTTP 转发是通的</b>，卡住的只是 WebSocket 升级这一段。</li>
-    <li><b>nginx</b>：需要 <code>proxy_http_version 1.1;</code>
-        <code>proxy_set_header Upgrade $http_upgrade;</code>
-        <code>proxy_set_header Connection $connection_upgrade;</code>
-        （配合 <code>map $http_upgrade $connection_upgrade</code>），并关闭 <code>proxy_buffering</code>。</li>
-    <li><b>QNAP / 威联通「反向代理」</b>：把<b>目标协议</b>从 <code>HTTP</code> 改成
-        <b>HTTP 和 WebSocket</b>（源协议保持 <code>HTTP</code>，目标仍 <code>localhost:6080</code>）。
-        实测这个组合下握手返回 101；两端都留纯 <code>HTTP</code> 时 Upgrade 会被吃掉，
-        正好产生现在这个现象。</li>
-    <li><b>群晖 DSM</b>：反向代理 → 编辑 → 自定义标题 → 点「WebSocket」按钮自动补两条头。</li>
-    <li><b>Cloudflare</b>：橙色云支持 WebSocket，但只监听固定端口（HTTPS 443 / 2053 / 2083 /
-        2087 / 2096 / 8443）；6088 这类端口必须靠 Tunnel 映射，或路由器把 443 转到 NAS。</li>
-    <li><b>路径被改写</b>：反代若加了前缀（如 <code>/115nas/</code>），给容器设
-        <code>WS_PATH=115nas/websockify</code> 后重启。</li>
-    <li><b>命令行自检</b>：<code>curl -i -N --noproxy '*' -H "Connection: Upgrade"
-        -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13"
-        -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" &lt;本页地址&gt;websockify</code>
-        必须返回 <code>HTTP/1.1 101</code>；返回 404 就是升级头被中间层剥掉了。
-        <code>--noproxy '*'</code> 不能省，否则本机代理会吃掉升级头，出现假阴性。</li>
-    <li>实在绕不过去：改用 <b>TCP 层映射</b>（路由器端口转发 / frp <code>type=tcp</code>）
-        直接指向容器 6080，HTTP 与 WS 一起透传。</li>
-  </ul>
-</div>
-<script>
-var QS = "__QS__";
-var WSPATH = "__WSPATH__";
-
-(function () {
-    if (/[?&]direct=1/.test(location.search)) { location.replace('vnc.html?' + QS); return; }
-
-    var msg   = document.getElementById('msg');
-    var urlEl = document.getElementById('url');
-    var acts  = document.getElementById('actions');
-    var hints = document.getElementById('hints');
-
-    var base = location.href.split('#')[0].split('?')[0].replace(/[^/]*$/, '');
-    var rel  = (WSPATH || 'websockify').replace(/^\/+/, '');
-    var wsUrl;
-    try { wsUrl = new URL(rel, base).href.replace(/^http/, 'ws'); }
-    catch (e) { wsUrl = base + rel; }
-    urlEl.textContent = wsUrl;
-
-    var settled = false;
-    function finish(ok, reason) {
-        if (settled) return;
-        settled = true;
-        if (ok) {
-            msg.className = 'ok';
-            msg.textContent = '连接正常，正在进入…';
-            // 立刻跳转：这里的 WS 连接只是探测，已经证明通道可用，
-            // 再等 300ms 纯属白让用户看一瞬提示（原实现如此）。
-            location.replace('vnc.html?' + QS);
-            return;
-        }
-        msg.className = 'bad';
-        msg.textContent = '无法建立 WebSocket 连接：' + reason;
-        acts.className  = '';
-        hints.className = '';
-    }
-
-    var ws, timer;
-    try { ws = new WebSocket(wsUrl); }
-    catch (e) { finish(false, '地址无法建立连接（' + e.message + '）'); return; }
-
-    timer = setTimeout(function () {
-        finish(false, '15 秒内没有完成握手（超时：代理未转发，或后端不可达）');
-        try { ws.close(); } catch (e) {}
-    }, 15000);
-
-    ws.onopen = function () {
-        clearTimeout(timer);
-        finish(true);
-        try { ws.close(); } catch (e) {}
-    };
-    ws.onerror = function () {
-        clearTimeout(timer);
-        finish(false, '握手被拒绝或被中断（Upgrade 头很可能被中间层剥掉了）');
-    };
-    ws.onclose = function (ev) {
-        clearTimeout(timer);
-        finish(false, '连接被关闭（code ' + ev.code + '）');
-    };
-})();
-</script>
-</body>
-</html>
-HTMLEOF
-
-    # 注入运行期变量：用 python3 做字符串替换 + 百分号编码，避免密码里的
-    # & = % 反斜杠 等字符破坏 URL 或 JS 字符串。python3 一定在（websockify 依赖它），
-    # sed 那条只是兜底（密码含特殊字符时可能不准）。
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$NOVNC_WEB/index.html" "$qs" "$auto_pw" "${WS_PATH:-}" <<'PYEOF'
-import io, sys
-from urllib.parse import quote
-
-path, qs, pw, ws_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-if pw:
-    qs += "&password=" + quote(pw, safe="")
-if ws_path:
-    qs += "&path=" + quote(ws_path, safe="")
-
-# 嵌入 JS 双引号字符串，转义反斜杠与双引号
-js_qs = qs.replace('\\', '\\\\').replace('"', '\\"')
-
-s = io.open(path, encoding='utf-8').read()
-s = s.replace('__QS__', js_qs).replace('__WSPATH__', ws_path.replace('\\', '\\\\').replace('"', '\\"'))
-io.open(path, 'w', encoding='utf-8').write(s)
-PYEOF
-    else
-        sed -i "s#__QS__#$qs#g; s#__WSPATH__#${WS_PATH:-}#g" "$NOVNC_WEB/index.html"
-    fi
-}
-gen_index
-log "entry page generated at $NOVNC_WEB/index.html (probes WebSocket before entering)"
-
-# ------------------------------------------- 6.5 收敛 GTK 文件选择器的可见路径
-# 115 客户端选「上传哪个文件 / 下到哪个目录」时弹的是 GTK3 原生文件选择器，
-# 它会把容器自己的文件系统整个摊开：/config（登录态）、/appdata（WebKit
-# Cookie）、/cache、/logs 这些卷，和 /bin /usr 等镜像目录，跟 NAS 目录混在一起。
-#
-# 标准 GTK3 **没有**「只显示指定目录」的开关：PlacesSidebar 的
-# show-other-locations / show-trash 全部是应用侧 API（gtk_places_sidebar_set_*），
-# 不是 settings.ini / gsettings 能改的；做成配置项的是 gtk3-classic 这类第三方
-# 补丁集，引入非官方包不值得。
-#
-# 所以这里只做**书签置顶**：写 $XDG_CONFIG_HOME/gtk-3.0/bookmarks。GTK 的所有
-# file chooser（含 Avalonia/.NET 等在 Linux 上复用 GTK 原生对话框的应用）共享这
-# 一个文件，写进去的目录固定排在侧栏顶部，一次点击直达，不用再翻卷列表。
-# 默认钉住 /root/Downloads（客户端默认下载目录）与 /media/nas（上传目录）。
-#
-# 【别再试「精简卷列表」】曾经用 LIBMOUNT_MTAB 喂一份只含 NAS 目录的挂载表，
-# 在 Debian 上不可能生效，根因（2026-10-21 读源码确认）：
-#   链路是 GVolumeMonitor → g_unix_mounts_get() → libmount。libmount 确实有
-#   mnt_get_mtab_path() 读 $LIBMOUNT_MTAB，但 __mnt_table_parse_mtab() 只在
-#   **编译了 USE_LIBMOUNT_SUPPORT_MTAB** 时才调 mnt_has_regular_mtab() 去取那个
-#   路径；否则 filename 直接置 NULL，硬编码读 /proc/self/mountinfo。
-#   Debian/Ubuntu 的 util-linux 都没开这个宏，所以那个环境变量读都不会被读到。
-#   要真的收干净只有两条路：mount namespace 遮蔽（要 CAP_SYS_ADMIN），或让客户端
-#   以非 root 跑（/config 等 700 就进不去）。成本远超收益，没做。
-#
-# 兜底开关：HIDE_SYSTEM_PATHS=0 关掉书签。
-setup_file_chooser() {
-    if [ "${HIDE_SYSTEM_PATHS:-1}" = "0" ]; then
-        log "file chooser: HIDE_SYSTEM_PATHS=0, container paths left as-is"
-        return
-    fi
-
-    # ---- ① 书签置顶 -------------------------------------------------------
-    # XDG_CONFIG_HOME=/config，所以书签落在 /config/gtk-3.0/bookmarks（随配置卷持久）。
-    local bmdir="${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/gtk-3.0"
-    mkdir -p "$bmdir" 2>/dev/null || { log "file chooser: WARN cannot create $bmdir"; return; }
-
-    local bm="$bmdir/bookmarks"
-    local items item path label n=0
-    # 条目用 | 分隔：路径里可能带空格/冒号，用 | 作分隔符歧义最小
-    IFS='|' read -r -a items <<< "${GTK_BOOKMARKS:-/root/Downloads=115 下载目录|/media/nas=NAS 共享目录}"
-    : > "$bm"
-    for item in "${items[@]}"; do
-        [ -n "$item" ] || continue
-        path="${item%%=*}"
-        label="${item#*=}"
-        [ -n "$path" ] || continue
-        if [ ! -d "$path" ]; then
-            log "file chooser: skip bookmark $path (not mounted)"
-            continue
-        fi
-        # file:// URI 中的空格必须转义成 %20；空格之后是显示名
-        printf 'file://%s %s\n' "$(printf '%s' "$path" | sed 's/ /%20/g')" "$label" >> "$bm"
-        n=$((n + 1))
-    done
-    if [ "$n" -gt 0 ]; then
-        log "file chooser: $n bookmark(s) pinned at $bm"
-    else
-        log "file chooser: WARN no bookmark directory exists (check NAS_SHARE mounts)"
-    fi
-}
-setup_file_chooser
-
-# ---------------------------------------------------------------- 7. Life115
-# 崩溃退出时记录并重启，保持容器可用（日志在 /logs/life115.log）。
-# 真实 PID 写到 $LIFE_PID_FILE：$LIFE_PID 是外层重启循环的 PID，不是客户端本身，
-# 停止容器时要停的是客户端（它才有状态要落盘），杀循环只会留下孤儿进程。
-log "starting Life115 (/opt/115life/Life115)"
+# ---------------------------------------------------------------- 4. Life115
+# 崩溃重启循环。真实 PID 写到 $LIFE_PID_FILE：外层循环的 PID 不是客户端本身，
+# 停止容器时要停的是客户端（它才有状态要落盘）。
+log "启动 115 生活客户端（/opt/115life/Life115）"
 rm -f "$LIFE_PID_FILE"
 (
     while true; do
         /opt/115life/Life115 >>"$LOG_DIR/life115.log" 2>&1 &
-        CHILD=$!
-        echo "$CHILD" > "$LIFE_PID_FILE"
-        wait "$CHILD"
-        RC=$?
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Life115 exited rc=$RC, restart in 3s" >> "$LOG_DIR/life115.log"
+        child=$!
+        echo "$child" > "$LIFE_PID_FILE"
+        wait "$child"
+        rc=$?
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Life115 退出 rc=$rc，3s 后重启" >> "$LOG_DIR/life115.log"
         sleep 3
     done
 ) &
 LIFE_PID=$!
 
-log "115nas container is up"
-log "  noVNC page : http://<host>:$HTTP_PORT/   (https://<host>:$HTTPS_PORT/)"
-log "  VNC target : $VNC_BIND:$VNC_PORT (raw RFB; for native VNC clients only)"
-log "  display    : $VNC_MODE (tigervnc = UTF-8 clipboard; x11vnc = Latin-1, CJK garbles)"
-log "  perf       : frame rate ${FPS_EFFECTIVE:-0}fps, noVNC quality ${NOVNC_QUALITY}, compression ${NOVNC_COMPRESSION}"
+log "115nas 已启动，总用时 $(since)ms"
+log "  访问地址 : http://<host>:$HTTP_PORT/   （诊断页 /diag.html）"
+log "  显示后端 : $DISPLAY_BACKEND（kasmvnc = UTF-8 剪贴板 + 自适应编码；x11vnc = 降级）"
+log "  图形渲染 : ${GRAPHICS_RENDER}"
+log "  性能参数 : ${VNC_FRAME_RATE}fps，画质 ${VNC_QUALITY_MIN}-${VNC_QUALITY_MAX}，webp ${VNC_WEBP_TIME}ms"
+if [ "$UMASK_EFFECTIVE" = "0022" ]; then
+    log "  文件权限 : umask $UMASK_EFFECTIVE（新文件 644、目录 755，属主 root，其他 uid 只读）"
+    log "             别的账号/套件需要写这些文件时设 UMASK=000（只影响新落盘的）"
+else
+    log "  文件权限 : umask $UMASK_EFFECTIVE（属主仍是 root；已下载的旧文件要 chmod）"
+fi
 
-# ---------------------------------------------------------------- 8. 常驻
-# sleep+wait 组合让 trap 能立即响应停止信号。
+# ---------------------------------------------------------------- 5. 常驻
+# 客户端起来后确认「窗口真的画出来了」。渲染后端协商失败时进程照样活着，
+# 只是不出画面——只看 pgrep 会把这种情况判成正常，然后用户看到的就是白屏。
+# 判据取窗口尺寸 >= 三位数：openbox 自己那个 1x1 的选窗窗口不算。
+(
+    i=0
+    while [ "$i" -lt 20 ]; do
+        sleep 1
+        if xwininfo -root -children 2>/dev/null \
+             | grep -E '^ +0x[0-9a-f]+ ' | grep -qE '[0-9]{3,4}x[0-9]{3,4}\+'; then
+            log "客户端窗口已创建（用时 $(since)ms）"
+            exit 0
+        fi
+        i=$((i + 1))
+    done
+    warn "20s 内没看到可见窗口：进程可能起来了但没画出界面，看 /logs/life115.log"
+) &
+
+# sleep+wait 让 trap 能立刻响应停止信号；顺带每分钟体检一次。
 while true; do
-    sleep 3600 &
+    sleep 60 &
     wait $! 2>/dev/null
-    # 关键进程死亡即让容器退出，由 docker restart 策略接管
-    if [ "$VNC_MODE" = "tigervnc" ]; then
-        kill -0 "$XVNC_PID" 2>/dev/null || { log "FATAL: Xtigervnc died, container exiting"; exit 1; }
-    else
-        kill -0 "$XVFB_PID" 2>/dev/null || { log "FATAL: Xvfb died, container exiting"; exit 1; }
-        kill -0 "$VNC_PID" 2>/dev/null || { log "FATAL: x11vnc died, container exiting"; exit 1; }
-    fi
-    kill -0 "$WS_PID"  2>/dev/null || { log "FATAL: websockify died, container exiting"; exit 1; }
+    health_check || exit 1
 done
