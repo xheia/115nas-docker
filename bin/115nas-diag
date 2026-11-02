@@ -79,7 +79,8 @@ else
     done
 fi
 # 关键区分：X 服务端注册了 GLX ≠ 客户端能拿到 visual。真正决定的是
-# mesa/nvidia 的供应商库在不在。没有它，Avalonia 的前两个后端必然失败。
+# mesa/nvidia 的供应商库在不在。但**有库也不等于能用**：容器没有 GPU，
+# 缺可用 visual 时 Avalonia 仍会回落到软件渲染。这里只报事实，不下结论。
 GLV=""
 for f in libGLX_mesa.so.0 libEGL_mesa.so.0 libGLX_nvidia.so.0; do
     [ -e "/usr/lib/x86_64-linux-gnu/$f" ] && GLV="$GLV $f"

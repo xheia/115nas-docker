@@ -160,15 +160,17 @@ wait_http() {
 
 # ---------------------------------------------------------------- 图形能力
 # 为什么要探测：115Life 的界面是 Avalonia(.NET) 自己画的，不是网页。它按
-# Glx → Egl → Software 的顺序挑后端（Avalonia.X11.dll 里三种都在）。容器内
-# 没有 mesa 的 GL 供应商库（libGLX_mesa / libEGL_mesa），所以前两种必然失败，
-# 最终落在 Skia 软件渲染。
+# Glx → Egl → Software 的顺序挑后端（Avalonia.X11.dll 里三种都在）。
 #
-# 这是**预期行为**，不是故障 —— 但如果不对读者说清，界面一卡就会被误判成
-# 「KasmVNC 编码太慢」。日志里报一行，省掉一轮扯皮。
+# 注意别把「有没有库」当成「走哪条路」：镜像里其实有 mesa 的 GL 供应商库
+# （libGLX_mesa / libEGL_mesa，作为 libgl1/libegl1 的依赖被带进来，CI 的 diag
+# 输出里就能看到），但容器没有 GPU，拿不到可用的硬件 visual 时 Avalonia 照样
+# 回落到 Skia 软件渲染。库在只是必要条件，不是充分条件 —— 所以这里只报事实，
+# 不替客户端下结论。
 #
-# 同理，GLX 扩展在 X 服务端有没有、和客户端能不能协商出 visual 是两件事：
-# 服务端注册了 GLX，没有 vendor 库照样拿不到可用 visual。所以这里分开报。
+# 这一步的意义是：界面一卡就会被误判成「KasmVNC 编码太慢」，日志里先留一行，
+# 省掉一轮扯皮。GLX 扩展在 X 服务端有没有，与客户端能不能协商出 visual 是两件事，
+# 所以下面分开报。
 GRAPHICS_EXTS=""
 GRAPHICS_GL_VENDOR=""
 GRAPHICS_RENDER=""
