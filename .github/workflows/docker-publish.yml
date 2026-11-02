@@ -240,6 +240,11 @@ jobs:
       # ---- 冒烟测试：真跑起来，确认没有静默降级 ----
       - name: Smoke test
         run: |
+          # Actions 的默认 shell 是 `bash -e`：任何一条命令返回非 0，整个 step 立刻
+          # 退出，后面所有检查都不会跑，也不会留下任何 annotation（表现为只看到
+          # 「Process completed with exit code 56」而不知道为什么）。这里显式关掉，
+          # 改成逐项累计 FAIL、最后统一 exit。
+          set +e
           set -uo pipefail
           FAIL=0
           docker run -d --name smoke -p 16080:6080 -e TZ=Asia/Shanghai "115nas-smoke:latest"
@@ -250,7 +255,7 @@ jobs:
           OK=0
           CODE=000
           for i in $(seq 1 45); do
-            CODE=$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:16080/ 2>/dev/null)
+            CODE=$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:16080/ 2>/dev/null || true)
             if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then OK=1; break; fi
             sleep 2
           done
@@ -275,11 +280,17 @@ jobs:
           fi
 
           # ② 诊断页可访问（401 = 开了登录口令，页面本身在；404/000 才是真问题）
-          DCODE=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:16080/diag.html 2>/dev/null)
+          # 连着两个请求打 KasmVNC 的 HTTP 服务时它偶发 reset（curl 56），先歇一下；
+          # 结果里带上 curl 退出码与容器内的实际文件，别让「读不到」冒充「不存在」。
+          sleep 1
+          DCODE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' http://127.0.0.1:16080/diag.html 2>/dev/null)
+          DRC=$?
           case "$DCODE" in
             200) echo "OK  诊断页 /diag.html" ;;
             401) echo "OK  诊断页存在（401 = 已启用登录口令）" ;;
-            *)   echo "::error::诊断页 /diag.html 返回 ${DCODE:-000}（期望 200）"; FAIL=1 ;;
+            *)   echo "::error::诊断页 /diag.html 返回 ${DCODE:-000}（期望 200，curl rc=$DRC）"
+                 echo "::error::容器内：$(docker exec smoke sh -c 'ls -l /usr/share/kasmvnc/www/diag.html 2>&1; grep -a 诊断页 /logs/entrypoint.log 2>/dev/null' 2>/dev/null | tr '\n' '|')"
+                 FAIL=1 ;;
           esac
 
           # ③ WebSocket 握手必须是 101（绕过反代时，容器内的这一段必须自证可用）
