@@ -1,44 +1,39 @@
 # 115nas — 115 生活客户端 Docker 版
 services:
   115nas:
-    # 默认跟最新版。想锁定就用具体 tag：
-    #   :client-37.3.1   只锁 115 客户端版本（新客户端出问题时可退回上一版），脚本仍随项目更新
-    #   :1.1.5           固定本项目版本（脚本与客户端一起冻结，最保守）
-    # 想本地构建：取消 build: . 的注释，并用
-    #   docker build --build-arg LIFE_DEB=115Life_<客户端版本>.deb .
-    # 选择内置哪个版本的 115 客户端。
     image: ghcr.io/xheia/115nas-docker:latest
     container_name: 115nas
     hostname: 115nas
     restart: unless-stopped
-    # 停止容器时给客户端留出退出的时间（默认只给 10 秒）。它要把上传/下载任务
-    # 状态写回本地库，来不及写就会被 SIGKILL，重启后上传列表里已完成的任务会
-    # 重新冒出来。
+    # 停止容器时给客户端留出退出的时间。Docker 默认只给 10 秒，而退出流程最坏要
+    # 1s（掐掉重启循环）+ LIFE_STOP_TIMEOUT（默认 8s，等客户端把传输队列写回
+    # 本地库）≈ 9s，只剩 1 秒余量；NAS 磁盘正忙时就会踩线，被 SIGKILL 后重启会看到
+    # 已完成的任务又冒出来。所以这里留一倍余量。
+    # 约束：STOP_GRACE 要带单位（如 30s），且 >= LIFE_STOP_TIMEOUT + 2。
     stop_grace_period: 20s
     shm_size: 1g
     ports:
-      - "6080:6080"     # noVNC 页面 + WebSocket（HTTP）
-      - "6081:6081"     # HTTPS（仅挂载证书时监听）
-      # - "5900:5900"   # 只有用「原生 VNC 客户端直连」才需要：同时要开
-      #                 # VNC_BIND=0.0.0.0 + VNC_PASSWORD，否则容器拒启
+      - "6080:6080"     # Web 页面 + WebSocket（同一端口）
     volumes:
       - ./data/config:/config       # 客户端配置与登录态（勿删）
       - ./data/appdata:/appdata     # WebKit Cookie = 扫码登录态（勿删）
       - ./data/cache:/cache         # 视频缓存
       - ./logs:/logs
-      - ${NAS_SHARE:-./data/nas}:/media/nas     #上传目录
-      - ${NAS_SHARE:-./data/nas}:/root/Downloads   # 客户端默认下载目录
+      - ./data/nas:/media/nas         # 上传目录
+      - ./nas/Downloads:/root/Downloads    # 客户端默认下载目录
     environment:
       - TZ=Asia/Shanghai
-      # - VNC_PASSWORD=yourpassword   # 暴露到公网时务必设置
-      # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端直连需要；必须同时设密码
-      # --- 性能（默认值已调过，一般不用动）---
-      # - VNC_FRAME_RATE=25           # 帧率上限，0 = 不限（默认 25；Xtigervnc 原生默认 60）
-      # - NOVNC_QUALITY=5             # JPEG 画质 0-9（默认 5）
-      # - NOVNC_COMPRESSION=1         # 压缩级别 0-9（默认 1，level 1 最省 CPU）
-      # - SCREEN_WIDTH=1600           # 虚拟屏分辨率（浏览器端自动缩放）
+      # - LIFE_STOP_TIMEOUT=15        # 传输任务多时加长；同时要把 STOP_GRACE 调得更大
+      # - VNC_PASSWORD=yourpassword   # 设了之后浏览器里会出现登录框
+      # - VNC_BIND=0.0.0.0            # 仅原生 VNC 客户端直连需要，必须同时设口令
+      # - VNC_FRAME_RATE=25           # 帧率上限，0 = 不限（服务端默认 60，太浪费）
+      # - VNC_QUALITY_MIN=3           # 动态画质下限（快速滚动时的流畅度）
+      # - VNC_QUALITY_MAX=7           # 动态画质上限（静态画面清晰度）
+      # - VNC_WEBP_TIME=5             # WebP 编码耗时预算，越大越清晰越费 CPU
+      # - SCREEN_WIDTH=1600           # 虚拟屏分辨率（浏览器端自适应缩放）
       # - SCREEN_HEIGHT=900
-      # --- 文件选择器（上传/选择下载目录时弹的那个窗口）侧栏书签 ---
-      # - HIDE_SYSTEM_PATHS=0         # 不钉书签（容器目录本来就能浏览，这只是快捷入口）
+      # - UMASK=000
+      # - DISPLAY_MODE=fallback       # 强制走 Xvfb+x11vnc（怀疑 KasmVNC 冲突时）
+      # --- 文件选择器（上传/选择下载目录时弹的窗口）侧栏书签 ---
+      # - HIDE_SYSTEM_PATHS=0         # 不钉书签
       # - GTK_BOOKMARKS=/root/Downloads=115 下载目录|/media/nas=NAS 共享目录
-      #                               # 钉在侧栏顶部的书签，| 分隔，路径=显示名

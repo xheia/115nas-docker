@@ -4,6 +4,8 @@
 .github
 data
 logs
+downloads
 *.log
 README.md
 docker-compose.yml
+.env

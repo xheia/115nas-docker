@@ -1,6 +1,10 @@
 # 运行时数据（挂卷产生，勿提交）
 data/
 logs/
+downloads/
+
+# 本地环境文件（compose 会自动读取，勿提交）
+.env
 
 # 镜像导出物（GB 级，勿提交）
 *.tar
