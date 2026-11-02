@@ -42,17 +42,23 @@ start_kasmvnc() {
     # 不显式写 None 的话，TigerVNC 系的默认值是 VncAuth 并要求口令文件，
     # 没设口令时容器会直接起不来。
     local sec_args=(-SecurityTypes None)
+    local auth_args=()
     if [ -n "$VNC_PASSWORD" ]; then
         # 口令文件必须落在 KasmVNC 的默认路径 $HOME/.kasmpasswd ——
         # 写到别处它不会读，表现为「设了口令但照样能进」。
         if printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" \
              | kasmvncpasswd -u vncuser -w "$HOME/.kasmpasswd" >/dev/null 2>&1; then
-            log "Web 登录口令已启用（用户 vncuser，口令文件 $HOME/.kasmpasswd）"
+            log "Web 登录口令已启用（用户名 vncuser，口令文件 $HOME/.kasmpasswd）"
             log "  验证方式：打开页面应出现登录框；若直接进了桌面，说明口令没生效"
         else
             fatal "VNC_PASSWORD 已设置，但 kasmvncpasswd 生成口令文件失败；拒绝在无认证状态下启动"
         fi
     else
+        # 关键：没有口令文件时 KasmVNC 对**所有** HTTP 请求回 401（连续几次还会
+        # 把来源 IP 拉进黑名单，日志里是 "IP ... is blacklisted, dropping"），
+        # 首页和 /websockify 一并进不去 —— 「没设口令」不等于「谁都能进」，
+        # 而是「谁都进不来」。必须显式 -DisableBasicAuth 才是匿名可访问。
+        auth_args=(-DisableBasicAuth)
         warn "未设置 VNC_PASSWORD：Web 端口无登录口令（靠反代/内网隔离）"
     fi
 
@@ -84,14 +90,13 @@ start_kasmvnc() {
         -geometry "${W}x${H}" -depth "$D" \
         -httpd "$www" \
         -websocketPort "$HTTP_PORT" -interface 0.0.0.0 \
-        "${sec_args[@]}" "${tls_args[@]}" "${enc_args[@]}" \
+        "${sec_args[@]}" "${auth_args[@]}" "${tls_args[@]}" "${enc_args[@]}" \
         -AlwaysShared -ac -desktop 115nas \
         >"$LOG_DIR/xkasmvnc.log" 2>&1 &
     XVNC_PID=$!
 
-    # 只等 HTTP 应答。探 5900 在这个模式下没有意义（它不绑那个端口），
-    # 而只看进程存活会被「参数被拒、X 直接 Fatal」骗过去 —— 那时进程号还在，
-    # 端口却永远不会就绪。
+    # 只等 HTTP 应答（401 也算应答，说明 Web 层活着）。探 5900 在这个模式下没有
+    # 意义（它不绑那个端口），而只看进程存活会被「参数被拒、X 直接 Fatal」骗过去。
     if ! wait_http "$HTTP_PORT" 20; then
         warn "kasmvnc: HTTP 端口 $HTTP_PORT 未就绪（见 $LOG_DIR/xkasmvnc.log）"
         tail -n 15 "$LOG_DIR/xkasmvnc.log" 2>/dev/null | while read -r l; do warn "  | $l"; done

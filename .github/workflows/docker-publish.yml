@@ -245,20 +245,27 @@ jobs:
           docker run -d --name smoke -p 16080:6080 -e TZ=Asia/Shanghai "115nas-smoke:latest"
 
           echo "等待 Web 端口就绪（最多 90s）…"
+          # 判据是「有 HTTP 应答」而不是 2xx：设了 VNC_PASSWORD 时首页会 401，
+          # 那属于健康状态。用 -f 会把 401 当成失败，一直等到超时。
           OK=0
+          CODE=000
           for i in $(seq 1 45); do
-            if curl -fsS -m 3 -o /dev/null http://127.0.0.1:16080/ 2>/dev/null; then OK=1; break; fi
+            CODE=$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:16080/ 2>/dev/null)
+            if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then OK=1; break; fi
             sleep 2
           done
+          echo "首页 HTTP 状态：${CODE:-000}"
           [ "$OK" = "1" ] || { echo "::error::Web 端口 90s 内未就绪"; FAIL=1; }
 
           # ① 首页必须是 KasmVNC 的客户端，而不是 fallback 的 noVNC 页
           #
           # 失败时把「到底起了哪个后端」直接塞进 ::error:: —— workflow 日志需要
           # 认证才能下载，而 annotation 是公开可读的，这是唯一能自助看到真因的通道。
-          BODY=$(curl -fsS -m 5 http://127.0.0.1:16080/ 2>/dev/null || true)
+          BODY=$(curl -s -m 5 http://127.0.0.1:16080/ 2>/dev/null || true)
           if echo "$BODY" | grep -qi "kasmvnc"; then
             echo "OK  首页是 KasmVNC 客户端"
+          elif [ "$CODE" = "401" ]; then
+            echo "::error::首页返回 401：没设 VNC_PASSWORD 却启用了 basic auth（缺 -DisableBasicAuth）"; FAIL=1
           else
             echo "::error::首页不是 KasmVNC 客户端 —— 显示栈可能降级了"; echo "$BODY" | head -c 400; FAIL=1
             flat() { tr '\n' '|' | tr -s ' ' | cut -c1-1200; }
@@ -267,9 +274,13 @@ jobs:
             echo "::error::xkasmvnc.log 末 40 行：$(docker exec smoke sh -c 'tail -n 40 /logs/xkasmvnc.log 2>/dev/null' | flat)"
           fi
 
-          # ② 诊断页可访问
-          curl -fsS -m 5 -o /dev/null http://127.0.0.1:16080/diag.html \
-            && echo "OK  诊断页 /diag.html" || { echo "::error::诊断页 404"; FAIL=1; }
+          # ② 诊断页可访问（401 = 开了登录口令，页面本身在；404/000 才是真问题）
+          DCODE=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:16080/diag.html 2>/dev/null)
+          case "$DCODE" in
+            200) echo "OK  诊断页 /diag.html" ;;
+            401) echo "OK  诊断页存在（401 = 已启用登录口令）" ;;
+            *)   echo "::error::诊断页 /diag.html 返回 ${DCODE:-000}（期望 200）"; FAIL=1 ;;
+          esac
 
           # ③ WebSocket 握手必须是 101（绕过反代时，容器内的这一段必须自证可用）
           WS=$(curl -s -i -m 8 --noproxy '*' \
