@@ -294,11 +294,15 @@ jobs:
           esac
 
           # ③ WebSocket 握手必须是 101（绕过反代时，容器内的这一段必须自证可用）。
-          #    KasmVNC 的服务端是自研 HTTP/WS 栈，握手时**强制要求 Origin**：
-          #      "/websockify request failed websocket checks, missing
-          #       Sec-WebSocket-Origin header" → 直接 404
-          #    浏览器会自动带 Origin，curl 不会，所以必须显式补上；否则这条
-          #    检查会把「我们没带头」误报成「WS 不通」。
+          #    KasmVNC 的服务端是自研 HTTP/WS 栈，握手时**强制要求两个头**：
+          #      Origin                 缺 → "missing Sec-WebSocket-Origin header"
+          #      Sec-WebSocket-Protocol 缺 → "missing Sec-WebSocket-Protocol header"
+          #    任一缺失都在 parse_handshake 里被拒，返回 404。浏览器/真实客户端
+          #    两者都会带，curl 默认都不带 —— 少了就是「我们没带头」，不是「WS 不通」。
+          #
+          #    WS_A 故意不带 Protocol，它的 404 是**预期结果**，用来和 WS_B 对照：
+          #    若 A 也从 404 变 101，说明服务端换成了宽松实现（比如降级到 noVNC 的
+          #    websockify），那时 B 就不该是唯一判据。任一 101 即算通。
           ORIGIN="http://127.0.0.1:16080"
           H_UP=(-H "Connection: Upgrade" -H "Upgrade: websocket"
                 -H "Sec-WebSocket-Version: 13"

@@ -50,7 +50,7 @@
   </div>
 
   <ul id="hints" class="hide">
-    <li>能打开这个页面 = <b>HTTP 转发是通的</b>；卡住的只是 WebSocket 升级那一段。</li>
+    <li>能打开这个页面 = <b>HTTP 转发是通的</b>；要查的只剩 WebSocket 升级那一段。</li>
     <li><b>QNAP / 威联通「反向代理」</b>：把<b>目标协议</b>从 <code>HTTP</code> 改成
         <b>HTTP 和 WebSocket</b>（源协议保持 HTTP，目标仍是 NAS 的 6080 端口）。
         两端都留纯 HTTP 时 Upgrade 头会被吃掉。</li>
@@ -64,12 +64,14 @@
     <li><b>路径前缀</b>：反代若把路径改写成 <code>/115nas/xxx</code>，需要在反代侧
         同时透传该前缀，容器本身不再需要 <code>WS_PATH</code>（KasmVNC 固定用
         <code>websockify</code>，相对本页解析）。</li>
-    <li><b>命令行自检</b>：
+    <li><b>命令行自检</b>（在能访问本页的机器上跑）：
       <code>curl -i -N --noproxy '*' -H "Connection: Upgrade" -H "Upgrade: websocket"
       -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw=="
+      -H "Origin: &lt;本页地址&gt;" -H "Sec-WebSocket-Protocol: binary"
       &lt;本页地址&gt;websockify</code> 必须返回 <code>HTTP/1.1 101</code>。
-      返回 404 就是升级头被中间层剥掉了；<code>--noproxy '*'</code> 不能省，
-      否则本机代理会吃掉升级头，出现假阴性。</li>
+      <b>Origin 和 Sec-WebSocket-Protocol 这两个头都不能省</b>——KasmVNC 的握手解析
+      缺任一就按非法请求拒掉，返回 404；那是命令本身不完整，不代表链路不通。
+      <code>--noproxy '*'</code> 同样不能省，否则本机代理会吃掉升级头，也是假阴性。</li>
     <li>实在绕不过去：用 <b>TCP 层映射</b>（路由器端口转发 / frp <code>type=tcp</code>）
         直接指向容器 6080，HTTP 与 WS 一起透传。</li>
   </ul>
@@ -120,7 +122,12 @@
     }
 
     try {
-      ws = new WebSocket(wsUrl);
+      // 第二个参数是子协议，浏览器会据此发出 Sec-WebSocket-Protocol 头。
+      // 不能省：KasmVNC 的握手解析对 HyBi 请求强制要求这个头，缺了直接当
+      // 非法请求拒掉（common/network/websocket.c 的 parse_handshake）。真实
+      // 客户端（KasmVNC 自己的 Web 端、noVNC）都会带 binary，这里要跟它一致，
+      // 否则探出来的是「我们没带头」，不是「链路不通」。
+      ws = new WebSocket(wsUrl, 'binary');
     } catch (e) {
       done('bad', '地址无法解析（' + e.message + '）');
       return;
@@ -130,7 +137,9 @@
     }, 15000);
 
     ws.onopen = function () { done('ok', '握手成功（101）'); };
-    ws.onerror = function () { done('bad', '握手被拒绝或被中断：Upgrade 头很可能被中间层剥掉了'); };
+    // 浏览器出于安全不暴露握手失败的状态码，404 / 400 / 连接重置在这里长得一样，
+    // 所以不要在这里断言根因，只把「没握手成功」这个事实报出来，细节交给下方命令。
+    ws.onerror = function () { done('bad', '握手未完成：升级请求被中间层挡下，或服务端拒绝了它'); };
     ws.onclose = function (ev) {
       // code 1006 = 异常关闭，通常是握手阶段就断了
       if (!settled) done('bad', '连接被关闭（code ' + ev.code + (ev.code === 1006 ? '，握手阶段断开' : '') + '）');
