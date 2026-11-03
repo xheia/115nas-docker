@@ -46,9 +46,17 @@ start_kasmvnc() {
     if [ -n "$VNC_PASSWORD" ]; then
         # 口令文件必须落在 KasmVNC 的默认路径 $HOME/.kasmpasswd ——
         # 写到别处它不会读，表现为「设了口令但照样能进」。
+        #
+        # 先删再写：kasmvncpasswd 的流程是「读整个文件 → 改/加这一行 → 整体写回」，
+        # 改了 VNC_USER 之后旧用户名那一行会被原样保留，结果两个账号都能登。
+        # 容器里只有环境变量这一个事实来源，每次重建反而更可预测。
+        #
+        # -rw 是两个独立的权限位：r 能看画面，w 能用键鼠。只给 -w 时是否仍按
+        # 只读处理取决于服务端实现（官方镜像用的是 -rwo），两个都写上不留歧义。
+        rm -f "$HOME/.kasmpasswd"
         if printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" \
-             | kasmvncpasswd -u vncuser -w "$HOME/.kasmpasswd" >/dev/null 2>&1; then
-            log "Web 登录口令已启用（用户名 vncuser，口令文件 $HOME/.kasmpasswd）"
+             | kasmvncpasswd -u "$VNC_USER" -rw "$HOME/.kasmpasswd" >/dev/null 2>&1; then
+            log "Web 登录口令已启用（用户名 $VNC_USER，口令文件 $HOME/.kasmpasswd）"
             log "  验证方式：打开页面应出现登录框；若直接进了桌面，说明口令没生效"
         else
             fatal "VNC_PASSWORD 已设置，但 kasmvncpasswd 生成口令文件失败；拒绝在无认证状态下启动"

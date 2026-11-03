@@ -95,6 +95,9 @@ fi
 
 # ---------------------------------------------------------------- 其它
 VNC_PASSWORD=${VNC_PASSWORD:-}
+# 与 VNC_PASSWORD 配对使用：这两个是同一个 Basic Auth 账号的用户名和口令。
+# 只设口令不设用户名时用下面的默认值，免得启动日志里冒出用户没设过的名字。
+VNC_USER=${VNC_USER:-vncuser}
 VNC_TLS_CERT=${VNC_TLS_CERT:-/certs/server.pem}
 LIFE_STOP_TIMEOUT=${LIFE_STOP_TIMEOUT:-8}
 LIFE_PID_FILE=/tmp/115nas-life115.pid

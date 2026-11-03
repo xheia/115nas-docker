@@ -71,7 +71,9 @@
       &lt;本页地址&gt;websockify</code> 必须返回 <code>HTTP/1.1 101</code>。
       <b>Origin 和 Sec-WebSocket-Protocol 这两个头都不能省</b>——KasmVNC 的握手解析
       缺任一就按非法请求拒掉，返回 404；那是命令本身不完整，不代表链路不通。
-      <code>--noproxy '*'</code> 同样不能省，否则本机代理会吃掉升级头，也是假阴性。</li>
+      <code>--noproxy '*'</code> 同样不能省，否则本机代理会吃掉升级头，也是假阴性。
+      若容器设了 <code>VNC_PASSWORD</code>，还要加 <code>-u vncuser:&lt;你的口令&gt;</code>
+      （用户名默认 <code>vncuser</code>，容器日志里会打出实际值），否则得到的是 401。</li>
     <li>实在绕不过去：用 <b>TCP 层映射</b>（路由器端口转发 / frp <code>type=tcp</code>）
         直接指向容器 6080，HTTP 与 WS 一起透传。</li>
   </ul>

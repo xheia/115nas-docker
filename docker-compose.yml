@@ -25,6 +25,7 @@ services:
       - TZ=Asia/Shanghai
       # - LIFE_STOP_TIMEOUT=15        # 传输任务多时加长；同时要把 STOP_GRACE 调得更大
       # - VNC_PASSWORD=yourpassword   # 设了之后浏览器里会出现登录框
+      # - VNC_USER=vncuser            # 登录用户名，与上面的口令配对（默认 vncuser）
       # - VNC_FRAME_RATE=25           # 帧率上限，0 = 不限（服务端默认 60，太浪费）
       # - VNC_QUALITY_MIN=3           # 动态画质下限（快速滚动时的流畅度）
       # - VNC_QUALITY_MAX=7           # 动态画质上限（静态画面清晰度）

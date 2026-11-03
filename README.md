@@ -106,7 +106,8 @@ docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装�
 | `VNC_QUALITY_MIN` / `VNC_QUALITY_MAX`             | 3 / 7                                           | 动态画质区间：下限决定滚动流畅度，上限决定静态清晰度                                                       |
 | `VNC_WEBP_TIME`                                   | `5`                                             | WebP 编码耗时预算，越大越清晰越费 CPU                                                          |
 | `HTTP_PORT`                                       | 6080                                            | 容器内 Web 端口。一般不用动；端口冲突改 compose 里 `ports` 的**左边**就够                               |
-| `VNC_PASSWORD`                                    | 空                                               | 设置后浏览器出现登录框。**公网暴露务必设置**                                                         |
+| `VNC_PASSWORD`                                    | 空                                               | 设置后浏览器出现登录框，**登录用户名见下一行**。公网暴露务必设置                                      |
+| `VNC_USER`                                        | `vncuser`                                        | 登录用户名，与 `VNC_PASSWORD` 配对：登录框里填这个名字 + 你设的口令。改名字后旧用户名失效                          |
 | `VNC_BIND`                                        | `127.0.0.1`                                     | **只对降级模式（`DISPLAY_MODE=fallback`）生效**：设 `0.0.0.0` 才对外开放 5900，且必须同时设 `VNC_PASSWORD`，否则拒绝启动 |
 | `VNC_TLS_CERT`                                    | `/certs/server.pem`                             | 挂载 PEM（证书+私钥合一）后，6080 改走 HTTPS/WSS                                               |
 | `DISPLAY_MODE`                                    | `auto`                                          | `kasmvnc` / `fallback` 可强制指定，排障用                                                 |
@@ -141,6 +142,8 @@ docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装�
 页面本身**没有账号体系**（`VNC_PASSWORD` 才有），谁打开谁就能操作你的 115 账号。务必：  
 ① 设 `VNC_PASSWORD=<强密码>`；② 前置 HTTPS（反代终止 TLS，或挂证书用 `VNC_TLS_CERT`）；  
 ③ 能限 IP 就限 IP，或只走 VPN / Tailscale，不要裸暴露到公网。
+
+登录框出现时，用户名是 **`vncuser`**（可用 `VNC_USER` 改），口令就是你设的 `VNC_PASSWORD`。
 
 ## 排障
 
