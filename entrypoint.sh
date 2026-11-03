@@ -186,7 +186,7 @@ LIFE_PID=$!
 log "115nas 已启动，总用时 $(since)ms"
 log "  访问地址 : http://<host>:$HTTP_PORT/   （诊断页 /diag.html）"
 log "  显示后端 : $DISPLAY_BACKEND（kasmvnc = UTF-8 剪贴板 + 自适应编码；x11vnc = 降级）"
-log "  图形渲染 : ${GRAPHICS_RENDER}"
+log "  图形库   : ${GRAPHICS_RENDER}"
 log "  性能参数 : ${VNC_FRAME_RATE}fps，画质 ${VNC_QUALITY_MIN}-${VNC_QUALITY_MAX}，webp ${VNC_WEBP_TIME}ms"
 if [ "$UMASK_EFFECTIVE" = "0022" ]; then
     log "  文件权限 : umask $UMASK_EFFECTIVE（新文件 644、目录 755，属主 root，其他 uid 只读）"

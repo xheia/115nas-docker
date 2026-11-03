@@ -189,9 +189,11 @@ detect_graphics() {
     GRAPHICS_GL_VENDOR=${GRAPHICS_GL_VENDOR# }
 
     if [ -n "$GRAPHICS_GL_VENDOR" ]; then
-        GRAPHICS_RENDER="OpenGL（vendor:$GRAPHICS_GL_VENDOR）"
+        # 不要写成「OpenGL」——这只证明库在，不证明用上了。容器没有 GPU 时
+        # Avalonia 拿不到硬件 visual，通常仍回落 Skia，而这行会被当成「GL 已生效」。
+        GRAPHICS_RENDER="有 GL 库（vendor:$GRAPHICS_GL_VENDOR），实际后端由客户端决定"
     else
-        GRAPHICS_RENDER="Skia 软件渲染（无 GL 供应商库，属预期）"
+        GRAPHICS_RENDER="无 GL 库，客户端只能软件渲染（属预期）"
     fi
 }
 
