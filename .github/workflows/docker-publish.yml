@@ -373,6 +373,59 @@ jobs:
             echo "::error::20s 内没有可见窗口（进程在但没画出界面，看 /logs/life115.log）"; FAIL=1
           fi
 
+          # ⑧ 设了 VNC_PASSWORD 的那条路径。这一段**以前从没被跑过**，而它是
+          #    「用户能不能进门」的唯一入口：口令文件生成命令换了参数（-w → -rw）、
+          #    用户名改成可配置后，一旦出错代码是 fatal 直接退出 —— 容器根本起不来，
+          #    而上面那些「无口令」检查照样全绿。用独立端口 + 独立容器，互不干扰。
+          docker run -d --name smoke-auth -p 16081:6080 -e TZ=Asia/Shanghai \
+            -e VNC_PASSWORD=smoke-pass -e VNC_USER=smokeuser "115nas-smoke:latest" >/dev/null
+          ACODE=000
+          for i in $(seq 1 45); do
+            ACODE=$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:16081/ 2>/dev/null || true)
+            [ -n "$ACODE" ] && [ "$ACODE" != "000" ] && break
+            # 容器若已 fatal 退出就别干等满 90s
+            docker inspect -f '{{.State.Running}}' smoke-auth 2>/dev/null | grep -q true || break
+            sleep 2
+          done
+          if [ "$ACODE" = "401" ]; then
+            echo "OK  设了口令时首页要求认证（401）"
+          else
+            echo "::error::设了 VNC_PASSWORD 但首页返回 ${ACODE:-000}（期望 401）"
+            echo "::error::smoke-auth 启动输出：$(docker logs smoke-auth 2>&1 | tr '\n' '|' | cut -c1-900)"
+            FAIL=1
+          fi
+
+          # 口令文件里的用户名与权限位必须与配置一致：rw 缺一个都会表现为
+          # 「能看不能动」或「根本进不去」，而这类错只能靠读文件发现。
+          PASSWD_LINE=$(docker exec smoke-auth sh -c 'cat "$HOME/.kasmpasswd" 2>/dev/null' 2>/dev/null | head -n 1)
+          echo "kasmpasswd: ${PASSWD_LINE%%:*}:<hash>:${PASSWD_LINE##*:}"
+          case "$PASSWD_LINE" in
+            smokeuser:*:rw*) echo "OK  口令文件用户 smokeuser、权限 rw" ;;
+            *) echo "::error::口令文件不符（期望 smokeuser:<hash>:rw）：$(docker exec smoke-auth sh -c 'ls -l "$HOME/.kasmpasswd"; cat "$HOME/.kasmpasswd"' 2>&1 | tr '\n' '|' | cut -c1-500)"; FAIL=1 ;;
+          esac
+
+          # 用配置的凭据必须能进（200）。放在错误口令检查之前：KasmVNC 对连续
+          # 认证失败会按来源 IP 拉黑，先成功再失败，失败那步才不会被自己的黑名单骗。
+          GCODE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -u smokeuser:smoke-pass \
+                    http://127.0.0.1:16081/ 2>/dev/null)
+          if [ "$GCODE" = "200" ]; then
+            echo "OK  VNC_USER / VNC_PASSWORD 可登录（200）"
+          else
+            echo "::error::用 \$VNC_USER:\$VNC_PASSWORD 登录失败，返回 ${GCODE:-000}（期望 200）"
+            echo "::error::口令文件：$(docker exec smoke-auth sh -c 'cat "$HOME/.kasmpasswd"' 2>&1 | tr '\n' '|' | cut -c1-300)"
+            FAIL=1
+          fi
+
+          # 错误口令必须被拒（非 200）。这条放在最后：它可能触发 IP 拉黑。
+          BCODE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -u smokeuser:wrong-pass \
+                    http://127.0.0.1:16081/ 2>/dev/null)
+          case "$BCODE" in
+            200) echo "::error::错误口令也能进（200）—— 口令文件里的权限位/哈希可能没生效"; FAIL=1 ;;
+            000) echo "note 错误口令的请求被直接断开（连续失败会拉黑来源 IP），同样算被拒" ;;
+            *)   echo "OK  错误口令被拒（${BCODE}）" ;;
+          esac
+          docker rm -f smoke-auth >/dev/null 2>&1 || true
+
           echo "===== entrypoint.log ====="
           docker exec smoke sh -c 'tail -n 40 /logs/entrypoint.log' 2>/dev/null || true
           echo "===== xkasmvnc.log（末 40 行）====="
