@@ -15,8 +15,52 @@ log() {
 warn() { log "WARNING: $*"; }
 fatal() { log "FATAL: $*"; exit 1; }
 
+# ---------------------------------------------------------------- 日志尺寸
+# KasmVNC 的 HTTP 访问日志是**无条件**打的：common/network/websocket.c 的
+# weblog() 直接 fprintf(stderr, ...)，不经过 rfb::LogWriter，所以
+# `-Log '*:stderr:10'` 对它一点作用都没有 —— 改级别只会连真正的诊断信息
+# 一起压掉，噪音照旧。能做的只有「长大后自己截断」。
+#
+# 增长来源（都与运行时长成正比，与下载量无关）：
+#   xkasmvnc.log    健康检查每 60s 一次请求 = 1440 行/天，另加前端轮询
+#   entrypoint.log  `>>` 追加，跨重启累加，永不清理
+#   life115.log     `>>` 追加，客户端自己也会写
+LOG_MAX_BYTES=2097152      # 2 MiB 触发截断
+LOG_KEEP_LINES=500
+LOG_TAIL_BYTES=262144      # 只从尾部读 256 KiB 再切行，别每次读整个文件
+
+# 原地截断：必须写回同一个 inode。写日志的进程持有的是 `>>` 打开的 fd，
+# 用 mv 换文件会让它继续往已 unlink 的 inode 追加 —— 表现是「截断之后日志
+# 再也不更新」，比不截断更糟。所以是 cat 覆盖，不是 mv。
+rotate_log_if_big() {
+    local f=$1 size
+    [ -f "$f" ] || return 0
+    size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    [ "$size" -gt "$LOG_MAX_BYTES" ] || return 0
+
+    if tail -c "$LOG_TAIL_BYTES" "$f" 2>/dev/null | tail -n "$LOG_KEEP_LINES" > "$f.rotating" 2>/dev/null; then
+        printf '[%s] 日志超过 %d KiB，已原地截断，只保留最后 %s 行\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$((LOG_MAX_BYTES / 1024))" "$LOG_KEEP_LINES" \
+            >> "$f.rotating"
+        cat "$f.rotating" > "$f" && rm -f "$f.rotating"
+    else
+        rm -f "$f.rotating"
+    fi
+}
+
+rotate_logs() {
+    local f
+    for f in "$LOG_DIR"/*.log; do
+        [ -e "$f" ] && rotate_log_if_big "$f"
+    done
+    return 0   # 目录为空或不存在时 glob 不匹配，别把 rc=1 传给调用方
+}
+
 # 先建日志目录，下面 UMASK 校验失败要往里写 warn
 mkdir -p "$LOG_DIR" 2>/dev/null
+
+# 上一次运行留下的日志先收一次尺寸，否则 entrypoint.log 会跨重启无限长。
+rotate_logs
 
 # ---------------------------------------------------------------- 文件权限
 # 容器以 root 运行（Dockerfile 里没有 USER），所以下载/上传落盘的属主就是

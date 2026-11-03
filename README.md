@@ -91,7 +91,7 @@ docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装�
 | `/config`           | `./data/config`  | 客户端配置、登录态、machine-id               |
 | `/appdata`          | `./data/appdata` | WebKit Cookie = **扫码登录态**          |
 | `/cache`            | `./data/cache`   | 视频缓存、字体缓存（可清）                      |
-| `/logs`             | `./logs`         | 各组件日志                              |
+| `/logs`             | `./logs`         | 各组件日志；单个文件超过 2 MiB 会自动截断保留最后 500 行 |
 | `/certs/server.pem` | 自备               | 让容器自己讲 HTTPS 时挂这里，见 `VNC_TLS_CERT` |
 
 > 容器以 **root** 运行，下载/上传的文件属主是 `root`、默认模式 `644`。NAS 上别的账号或  
@@ -106,7 +106,7 @@ docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装�
 | `VNC_QUALITY_MIN` / `VNC_QUALITY_MAX`             | 3 / 7                                           | 动态画质区间：下限决定滚动流畅度，上限决定静态清晰度                                                       |
 | `VNC_WEBP_TIME`                                   | `5`                                             | WebP 编码耗时预算，越大越清晰越费 CPU                                                          |
 | `HTTP_PORT`                                       | 6080                                            | 容器内 Web 端口。一般不用动；端口冲突改 compose 里 `ports` 的**左边**就够                               |
-| `VNC_PASSWORD`                                    | 空                                               | 设置后浏览器出现登录框，**登录用户名见下一行**。公网暴露务必设置                                      |
+| `VNC_PASSWORD`                                    | 空                                               | 设置后浏览器出现登录框，**登录用户名见下一行**。至少 6 位（工具硬限制），公网暴露务必设置                         |
 | `VNC_USER`                                        | `vncuser`                                        | 登录用户名，与 `VNC_PASSWORD` 配对：登录框里填这个名字 + 你设的口令。改名字后旧用户名失效                          |
 | `VNC_BIND`                                        | `127.0.0.1`                                     | **只对降级模式（`DISPLAY_MODE=fallback`）生效**：设 `0.0.0.0` 才对外开放 5900，且必须同时设 `VNC_PASSWORD`，否则拒绝启动 |
 | `VNC_TLS_CERT`                                    | `/certs/server.pem`                             | 挂载 PEM（证书+私钥合一）后，6080 改走 HTTPS/WSS                                               |

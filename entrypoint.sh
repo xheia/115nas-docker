@@ -33,6 +33,7 @@
 #
 # 日志：/logs/entrypoint.log（总）、xkasmvnc.log、openbox.log、fcitx5.log、
 #       life115.log、websockify.log（仅降级模式）、xvfb.log / x11vnc.log
+#       单个文件超过 2 MiB 时原地截断、保留最后 500 行（启动一次 + 每分钟一次）。
 ###############################################################################
 set -u
 
@@ -214,8 +215,11 @@ fi
 ) &
 
 # sleep+wait 让 trap 能立刻响应停止信号；顺带每分钟体检一次。
+# rotate_logs 放在这里而不是用 cron/init：常驻进程只有这一个循环，
+# 少一个后台进程就少一处需要守活的东西。
 while true; do
     sleep 60 &
     wait $! 2>/dev/null
     health_check || exit 1
+    rotate_logs
 done
