@@ -19,8 +19,12 @@ services:
       - ./data/appdata:/appdata     # WebKit Cookie = 扫码登录态（勿删）
       - ./data/cache:/cache         # 视频缓存
       - ./logs:/logs
-      - ./data/nas:/media/nas         # 上传目录
-      - ./nas/Downloads:/root/Downloads    # 客户端默认下载目录
+      # 下载与上传共用宿主机上的同一个 downloads/ 目录，两行的左边必须一致：
+      # 客户端把文件落到 /root/Downloads，而「上传/选择文件」的弹窗里走的是
+      # /media/nas，指向两处就会看到「下载完了但上传对话框里找不到」。
+      # 想直接落到共享盘，把两行的左边一起改成绝对路径（如 /share/Download）。
+      - ./downloads:/root/Downloads   # 客户端默认下载目录
+      - ./downloads:/media/nas        # 同一目录的另一个入口，文件选择器可见
     environment:
       - TZ=Asia/Shanghai
       # - LIFE_STOP_TIMEOUT=15        # 传输任务多时加长；同时要把 STOP_GRACE 调得更大

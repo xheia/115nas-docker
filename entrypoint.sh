@@ -172,13 +172,29 @@ log "桌面会话准备完毕，用时 $(since)ms"
 log "启动 115 生活客户端（/opt/115life/Life115）"
 rm -f "$LIFE_PID_FILE"
 (
+    short_runs=0
     while true; do
         /opt/115life/Life115 >>"$LOG_DIR/life115.log" 2>&1 &
         child=$!
         echo "$child" > "$LIFE_PID_FILE"
+        started=$(date +%s)
         wait "$child"
         rc=$?
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Life115 退出 rc=$rc，3s 后重启" >> "$LOG_DIR/life115.log"
+        ran=$(( $(date +%s) - started ))
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Life115 退出 rc=$rc（存活 ${ran}s），3s 后重启" >> "$LOG_DIR/life115.log"
+
+        # 崩溃告警：客户端自己起不来时，这个循环会每 3 秒重试一次，而
+        # health_check 只管显示栈 —— 容器看起来一切正常，用户看到的是白屏或闪退。
+        # 存活不到 60s 记一次「短命退出」，每攒够 3 次在容器日志里明确喊一声，
+        # 免得要翻 /logs/life115.log 才发现是在反复崩。
+        if [ "$ran" -lt 60 ]; then
+            short_runs=$((short_runs + 1))
+            if [ $((short_runs % 3)) -eq 0 ]; then
+                warn "Life115 在 60s 内已退出 $short_runs 次（最近一次 rc=$rc，存活 ${ran}s），看 /logs/life115.log"
+            fi
+        else
+            short_runs=0
+        fi
         sleep 3
     done
 ) &
@@ -187,7 +203,7 @@ LIFE_PID=$!
 log "115nas 已启动，总用时 $(since)ms"
 log "  访问地址 : http://<host>:$HTTP_PORT/   （诊断页 /diag.html）"
 log "  显示后端 : $DISPLAY_BACKEND（kasmvnc = UTF-8 剪贴板 + 自适应编码；x11vnc = 降级）"
-log "  图形库   : ${GRAPHICS_RENDER}"
+# 图形能力在上面 detect_graphics 之后已经报过一次，这里不重复。
 log "  性能参数 : ${VNC_FRAME_RATE}fps，画质 ${VNC_QUALITY_MIN}-${VNC_QUALITY_MAX}，webp ${VNC_WEBP_TIME}ms"
 if [ "$UMASK_EFFECTIVE" = "0022" ]; then
     log "  文件权限 : umask $UMASK_EFFECTIVE（新文件 644、目录 755，属主 root，其他 uid 只读）"

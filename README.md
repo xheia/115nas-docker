@@ -60,6 +60,8 @@ docker inspect --format '{{index .Config.Labels "115nas.client-version"}}' ghcr.
 
 | 本项目   | 内置 115 客户端 | 主要变化                                        |
 | ----- | ---------- | ------------------------------------------- |
+| 1.1.8 | 37.3.2     | 下载与上传统一到 `./downloads`；启动日志去重；客户端反复崩溃会告警     |
+| 1.1.7 | 37.3.2     | 登录用户名与口令配对（`VNC_USER`）；诊断页不再误报 WebSocket 失败 |
 | 1.1.6 | 37.3.2     | 显示栈换成 KasmVNC（三进程合一）、单端口、诊断页与 `115nas-diag` |
 | 1.1.5 | 37.3.2     | 每版一个客户端镜像；修正帧率探测                            |
 | 1.1.4 | 37.3.1     | 停止容器时让客户端自己退出，传输队列能落盘                       |
@@ -93,6 +95,19 @@ docker exec 115nas dpkg-query -W -f='${Version}\n' 115life   # 确认实际装�
 | `/cache`            | `./data/cache`   | 视频缓存、字体缓存（可清）                      |
 | `/logs`             | `./logs`         | 各组件日志；单个文件超过 2 MiB 会自动截断保留最后 500 行 |
 | `/certs/server.pem` | 自备               | 让容器自己讲 HTTPS 时挂这里，见 `VNC_TLS_CERT` |
+
+> **从 1.1.7 及更早版本升级**：旧 compose 把下载写进 `./nas/Downloads`、上传写进 `./data/nas`，  
+> 1.1.8 起统一为 `./downloads`。先停容器、把两个旧目录的内容合并过去，再启动：
+>
+> ```bash
+> docker compose down
+> mkdir -p downloads
+> rsync -a ./nas/Downloads/ ./downloads/ 2>/dev/null   # 没有 rsync 就用 cp -a
+> rsync -a ./data/nas/      ./downloads/ 2>/dev/null
+> docker compose up -d
+> ```
+>
+> 确认文件都在 `downloads/` 之后，再删掉空的 `./nas` 与 `./data/nas`。
 
 > 容器以 **root** 运行，下载/上传的文件属主是 `root`、默认模式 `644`。NAS 上别的账号或  
 > 套件（Emby/Jellyfin/Plex、另一个 uid 的下载器）需要写这些文件时设 `UMASK=000`，  

@@ -238,7 +238,11 @@ detect_graphics() {
     if [ -n "$GRAPHICS_GL_VENDOR" ]; then
         # 不要写成「OpenGL」——这只证明库在，不证明用上了。容器没有 GPU 时
         # Avalonia 拿不到硬件 visual，通常仍回落 Skia，而这行会被当成「GL 已生效」。
-        GRAPHICS_RENDER="有 GL 库（vendor:$GRAPHICS_GL_VENDOR），实际后端由客户端决定"
+        #
+        # 分隔符用 bash 参数替换而不是 tr：tr 是**按字节**一对一映射，
+        # 而「、」是 3 字节 UTF-8，tr ' ' '、' 只会留下第一个字节，
+        # 日志里就是「libGLX_mesa.so.0<乱码>libEGL_mesa.so.0」。
+        GRAPHICS_RENDER="有 GL 库（${GRAPHICS_GL_VENDOR// /、}），实际后端由客户端决定"
     else
         GRAPHICS_RENDER="无 GL 库，客户端只能软件渲染（属预期）"
     fi

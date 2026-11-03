@@ -123,7 +123,8 @@ start_kasmvnc() {
 
     DISPLAY_BACKEND="kasmvnc"
     log "Xkasmvnc 已就绪：Web/WS :$HTTP_PORT（HTTP、WebSocket、RFB 同一端口，pid $XVNC_PID）"
-    log "  编码：frame rate ${VNC_FRAME_RATE}fps，动态画质 ${VNC_QUALITY_MIN}-${VNC_QUALITY_MAX}，webp 预算 ${VNC_WEBP_TIME}ms"
+    # 编码参数不在这里报：启动摘要里有一行「性能参数」，两处都打会让每次启动
+    # 重复两串一样的数字。参数本身可从 xkasmvnc.log 的命令行或摘要里看到。
     return 0
 }
 
