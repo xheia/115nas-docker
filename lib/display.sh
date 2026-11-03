@@ -53,13 +53,22 @@ start_kasmvnc() {
         #
         # -rw 是两个独立的权限位：r 能看画面，w 能用键鼠。只给 -w 时是否仍按
         # 只读处理取决于服务端实现（官方镜像用的是 -rwo），两个都写上不留歧义。
+        #
+        # 口令长度要自己先拦：kasmvncpasswd 小于 6 位直接 "Password must be at
+        # least 6 characters" 然后退出，而那句话进了 stderr —— 之前被丢进
+        # /dev/null，用户只看到「生成失败」，完全不知道是口令太短。
+        if [ "${#VNC_PASSWORD}" -lt 6 ]; then
+            fatal "VNC_PASSWORD 只有 ${#VNC_PASSWORD} 位；kasmvncpasswd 要求至少 6 位，请改长一点"
+        fi
         rm -f "$HOME/.kasmpasswd"
         if printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" \
-             | kasmvncpasswd -u "$VNC_USER" -rw "$HOME/.kasmpasswd" >/dev/null 2>&1; then
+             | kasmvncpasswd -u "$VNC_USER" -rw "$HOME/.kasmpasswd" >/dev/null 2>"$LOG_DIR/kasmpasswd.err"; then
             log "Web 登录口令已启用（用户名 $VNC_USER，口令文件 $HOME/.kasmpasswd）"
             log "  验证方式：打开页面应出现登录框；若直接进了桌面，说明口令没生效"
         else
-            fatal "VNC_PASSWORD 已设置，但 kasmvncpasswd 生成口令文件失败；拒绝在无认证状态下启动"
+            local kerr
+            kerr=$(tr '\n' ' ' <"$LOG_DIR/kasmpasswd.err" 2>/dev/null | cut -c1-300)
+            fatal "VNC_PASSWORD 已设置，但 kasmvncpasswd 生成口令文件失败（${kerr:-无输出，看 $LOG_DIR/kasmpasswd.err}）；拒绝在无认证状态下启动"
         fi
     else
         # 关键：没有口令文件时 KasmVNC 对**所有** HTTP 请求回 401（连续几次还会
