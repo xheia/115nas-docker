@@ -49,7 +49,7 @@ RUN set -eux; \
 # ---- 阶段 2：运行镜像 -------------------------------------------------------
 FROM debian:12-slim
 
-ARG APP_VERSION=1.1.6
+ARG APP_VERSION=1.1.9
 ARG CLIENT_VERSION=unknown
 
 LABEL org.opencontainers.image.title="115nas" \
@@ -141,7 +141,7 @@ RUN set -eux; \
 # 用 --build-arg LIFE_DEB=115Life_<版本>.deb 选择内置哪个客户端版本；
 # 默认值等于「本地直接 docker build 时用哪个」。发版时 CI 会把版本号与
 # APP_VERSION 一起打进去，二者对应关系见 README「版本」。
-ARG LIFE_DEB=115Life_37.3.2.deb
+ARG LIFE_DEB=115Life_37.3.3.deb
 COPY ${LIFE_DEB} /tmp/115life.deb
 RUN set -eux; \
     dpkg -i /tmp/115life.deb || true; \
